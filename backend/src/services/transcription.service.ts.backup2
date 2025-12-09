@@ -1,0 +1,647 @@
+import { spawn, ChildProcess, spawnSync } from 'child_process';
+import path from 'path';
+import fs from 'fs/promises';
+import { createWriteStream, WriteStream, existsSync } from 'fs';
+import os from 'os';
+import { DatabaseService } from './database.service';
+import { FileService } from './file.service';
+import { PythonTranscriptionResult } from '../types';
+import { sendProgress, closeSSEConnection } from '../routes/sse.routes';
+
+export class TranscriptionService {
+  private dbService: DatabaseService;
+  private fileService: FileService;
+  private readonly MAX_MEMORY_OUTPUT = 10_000_000; // 10MB max for in-memory processing
+  private readonly MAX_STDERR_SIZE = 100 * 1024; // 100KB max para stderr
+
+  constructor() {
+    this.dbService = new DatabaseService();
+    this.fileService = new FileService();
+  }
+
+  /**
+   * Processa uma transcrição de forma assíncrona
+   */
+  async processTranscription(id: string, filePath: string, modelSize: string): Promise<void> {
+    try {
+      console.log(`🎬 Starting transcription for ${id} with model ${modelSize}`);
+
+      // Verificar tamanho do arquivo
+      const stats = await fs.stat(filePath);
+      const fileSizeMB = stats.size / (1024 * 1024);
+      console.log(`📊 File size: ${fileSizeMB.toFixed(2)} MB`);
+
+      // Sugerir modelo menor para arquivos muito grandes
+      if (fileSizeMB > 1000 && modelSize === 'large') {
+        console.warn(`⚠️ Large file (${fileSizeMB.toFixed(2)}MB) with large model. Consider using 'medium' or 'small'`);
+      }
+
+      // Progresso inicial
+      sendProgress(id, 5, 'Iniciando processamento...');
+
+      // Atualiza status para processing
+      await this.dbService.updateStatus(id, 'processing');
+      sendProgress(id, 10, 'Preparando transcrição...');
+
+      // Executa script Python com timeout apropriado
+      const timeout = this.calculateTimeout(fileSizeMB);
+      const result = await this.runPythonScript(filePath, modelSize, id, timeout);
+
+      if (result.success && (result.text || result.text_file)) {
+        sendProgress(id, 95, 'Salvando resultado...');
+
+        // Obter texto (de memória ou arquivo)
+        let transcriptionText = '';
+
+        if (result.text_file) {
+          // Ler transcrição do arquivo
+          console.log(`📂 Reading transcription from file: ${result.text_file}`);
+          transcriptionText = await this.readTranscriptionFile(result.text_file);
+          // Deletar arquivo JSON temporário
+          await this.fileService.deleteFile(result.text_file);
+        } else if (result.text) {
+          transcriptionText = result.text;
+        }
+
+        // Salva resultado no banco
+        await this.dbService.updateTranscription(
+          id,
+          transcriptionText,
+          result.processing_time || 0
+        );
+        await this.dbService.updateStatus(id, 'completed');
+
+        sendProgress(id, 100, 'Transcrição concluída!');
+        console.log(`✅ Transcription completed for ${id}`);
+        console.log(`📊 Text length: ${transcriptionText.length} characters`);
+
+        // Deleta arquivos temporários
+        await this.fileService.deleteTranscriptionFiles(filePath, result.audio_path);
+
+        // Fechar conexão SSE
+        setTimeout(() => closeSSEConnection(id), 2000);
+
+      } else {
+        // Erro na transcrição
+        sendProgress(id, 0, 'Erro na transcrição');
+        await this.dbService.updateStatus(id, 'failed', result.error || 'Unknown error');
+        console.error(`❌ Transcription failed for ${id}:`, result.error);
+
+        // Deleta arquivo de vídeo
+        await this.fileService.deleteFile(filePath);
+        closeSSEConnection(id);
+      }
+    } catch (error: any) {
+      console.error(`❌ Error processing transcription ${id}:`, error);
+
+      // Mensagem de erro mais específica
+      let errorMessage = error.message;
+      if (error.message.includes('ENOMEM')) {
+        errorMessage = 'Memória insuficiente. Tente usar um modelo menor ou dividir o arquivo.';
+      } else if (error.message.includes('timeout')) {
+        errorMessage = 'Tempo limite excedido. O arquivo é muito grande para processar.';
+      } else if (error.message.includes('Stack overflow')) {
+        errorMessage = 'Arquivo muito grande causou estouro de memória. Use um modelo menor.';
+      }
+
+      sendProgress(id, 0, `Erro: ${errorMessage}`);
+      await this.dbService.updateStatus(id, 'failed', errorMessage);
+      await this.fileService.deleteFile(filePath);
+      closeSSEConnection(id);
+    }
+  }
+
+  /**
+   * Calcula timeout baseado no tamanho do arquivo
+   */
+  private calculateTimeout(fileSizeMB: number): number {
+    // Base: 5 minutos + 2 minutos por 100MB
+    const baseTimeout = 5 * 60 * 1000; // 5 minutos
+    const additionalTimeout = Math.ceil(fileSizeMB / 100) * 2 * 60 * 1000; // 2 min por 100MB
+    const maxTimeout = 120 * 60 * 1000; // Máximo de 2 horas
+    
+    const timeout = Math.min(baseTimeout + additionalTimeout, maxTimeout);
+    console.log(`⏱️ Timeout set to ${timeout / 1000 / 60} minutes`);
+    return timeout;
+  }
+
+  /**
+   * Lê arquivo de transcrição JSON
+   */
+  private async readTranscriptionFile(filePath: string): Promise<string> {
+    try {
+      const content = await fs.readFile(filePath, 'utf-8');
+      const data = JSON.parse(content);
+      return data.text || '';
+    } catch (error) {
+      console.error(`❌ Error reading transcription file: ${error}`);
+      throw new Error('Failed to read transcription result file');
+    }
+  }
+
+  /**
+   * Executa o script Python de transcrição com melhor gestão de memória
+
+    // Criar diretório temporário para chunks
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'audio_chunks_'));
+    const chunkPattern = path.join(tempDir, 'chunk_%03d.wav');
+
+    console.log(`✂️ Splitting audio into ${chunkDuration}s WAV chunks: ${audioPath}`);
+    console.log(`📁 Temp directory: ${tempDir}`);
+
+    return new Promise((resolve, reject) => {
+      const ffmpeg = spawn(ffmpegPath, [
+        '-y',
+        '-i', audioPath,
+        '-f', 'segment',
+        '-segment_time', chunkDuration.toString(),
+        '-c:a', 'pcm_s16le', // WAV PCM 16-bit (sem compressão, melhor qualidade)
+        '-ar', '16000',      // Sample rate 16kHz (ideal para Whisper)
+        '-ac', '1',          // Mono (Whisper funciona melhor)
+        '-reset_timestamps', '1',
+        chunkPattern
+      ]);
+
+      let stderrOutput = '';
+
+      ffmpeg.stderr?.on('data', (data) => {
+        stderrOutput += data.toString();
+      });
+
+      ffmpeg.on('close', async (code) => {
+        if (code === 0) {
+          try {
+            // Listar chunks criados
+            const files = await fs.readdir(tempDir);
+            const chunks = files
+              .filter(f => f.startsWith('chunk_') && f.endsWith('.wav'))
+              .sort()
+              .map(f => path.join(tempDir, f));
+
+            console.log(`✅ Created ${chunks.length} WAV chunks (16kHz mono)`);
+            resolve(chunks);
+          } catch (error) {
+            reject(new Error(`Failed to list chunks: ${error}`));
+          }
+        } else {
+          console.error(`❌ ffmpeg failed with code ${code}`);
+          console.error(`Error output: ${stderrOutput.slice(-500)}`);
+          reject(new Error(`Failed to split audio (code ${code})`));
+        }
+      });
+
+      ffmpeg.on('error', (error) => {
+        console.error(`❌ Failed to spawn ffmpeg:`, error);
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * Obtém duração de um arquivo de áudio/vídeo usando ffmpeg
+   * @returns Duração em segundos
+   */
+  private async getAudioDuration(filePath: string): Promise<number> {
+    const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+
+    return new Promise((resolve, reject) => {
+      const ffprobe = spawn(ffmpegPath.replace('ffmpeg', 'ffprobe'), [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        filePath
+      ]);
+
+      let stdout = '';
+      let stderr = '';
+
+      ffprobe.stdout?.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      ffprobe.stderr?.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      ffprobe.on('close', (code) => {
+        if (code === 0) {
+          const duration = parseFloat(stdout.trim());
+          if (!isNaN(duration)) {
+            resolve(duration);
+          } else {
+            reject(new Error('Failed to parse duration'));
+          }
+        } else {
+          console.error(`❌ ffprobe failed: ${stderr}`);
+          reject(new Error(`Failed to get audio duration (code ${code})`));
+        }
+      });
+
+      ffprobe.on('error', () => {
+        // Fallback: tentar com moviepy via Python (se ffprobe não estiver disponível)
+        console.warn('⚠️ ffprobe not found, estimating duration from file size');
+        resolve(0); // Retornar 0 para forçar chunking se necessário
+      });
+    });
+  }
+
+  /**
+   * Transcreve um único chunk usando Python em modo --simple
+   */
+  private async transcribeSingleChunk(
+    chunkPath: string,
+    modelSize: string,
+    chunkNumber: number,
+    totalChunks: number,
+    transcriptionId?: string
+  ): Promise<{ text: string; processingTime: number }> {
+    return new Promise(async (resolve, reject) => {
+      const pythonScript = path.join(__dirname, '../../python/transcribe.py');
+      const pythonPath = process.env.PYTHON_PATH || 'python3';
+
+      console.log(`🔧 Transcribing chunk ${chunkNumber}/${totalChunks}: ${chunkPath}`);
+
+      const pythonProcess = spawn(pythonPath, ['-B', pythonScript, chunkPath, modelSize, '--simple'], {
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+          FFMPEG_PATH: process.env.FFMPEG_PATH || '',
+        },
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      pythonProcess.stdout?.on('data', (data) => {
+        stdout += data.toString('utf-8');
+      });
+
+      pythonProcess.stderr?.on('data', (data) => {
+        const message = data.toString('utf-8');
+        stderr += message;
+
+        // Log apenas linhas importantes
+        if (message.includes('Error') || message.includes('WARNING')) {
+          console.log(`Python stderr (chunk ${chunkNumber}): ${message.trim()}`);
+        }
+      });
+
+      pythonProcess.on('close', async (code) => {
+        if (code === 0) {
+          try {
+            const result = JSON.parse(stdout);
+            if (result.success) {
+              console.log(`✅ Chunk ${chunkNumber}/${totalChunks} completed: ${result.text_length} chars`);
+              resolve({
+                text: result.text,
+                processingTime: result.processing_time || 0
+              });
+            } else {
+              // Erro retornado pelo Python
+              await this.saveFailedChunk(chunkPath, chunkNumber, transcriptionId, code, stderr);
+              reject(new Error(result.error || 'Unknown error in chunk transcription'));
+            }
+          } catch (error) {
+            // Erro ao fazer parse do JSON
+            await this.saveFailedChunk(chunkPath, chunkNumber, transcriptionId, code, stderr);
+            console.error(`❌ Failed to parse chunk ${chunkNumber} output:`, error);
+            reject(new Error(`Failed to parse chunk ${chunkNumber} result`));
+          }
+        } else {
+          // Processo Python terminou com código de erro
+          await this.saveFailedChunk(chunkPath, chunkNumber, transcriptionId, code, stderr);
+          console.error(`❌ Chunk ${chunkNumber} failed with code ${code}`);
+          console.error(`Error output: ${stderr.slice(-500)}`);
+          reject(new Error(`Chunk ${chunkNumber} transcription failed (code ${code})`));
+        }
+      });
+
+      pythonProcess.on('error', async (error) => {
+        // Erro ao spawnar o processo
+        await this.saveFailedChunk(chunkPath, chunkNumber, transcriptionId, null, error.message);
+        console.error(`❌ Failed to spawn Python for chunk ${chunkNumber}:`, error);
+        reject(error);
+      });
+    });
+  }
+
+  /**
+   * Salva um chunk que falhou para análise posterior
+   */
+  private async saveFailedChunk(
+    chunkPath: string,
+    chunkNumber: number,
+    transcriptionId: string | undefined,
+    exitCode: number | null,
+    errorOutput: string
+  ): Promise<void> {
+    try {
+      // Criar pasta para chunks com falha
+      const failedDir = path.join(__dirname, '..', '..', 'failed_chunks');
+      await fs.mkdir(failedDir, { recursive: true });
+
+      // Nome do arquivo de destino (detectar extensão do chunk)
+      const chunkExt = path.extname(chunkPath); // .wav ou .mp3
+      const chunkNumStr = chunkNumber.toString().padStart(3, '0');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const destFilename = transcriptionId
+        ? `transcription_${transcriptionId}_chunk_${chunkNumStr}_${timestamp}${chunkExt}`
+        : `chunk_${chunkNumStr}_${timestamp}${chunkExt}`;
+
+      const dest = path.join(failedDir, destFilename);
+
+      // Copiar o chunk problemático
+      await fs.copyFile(chunkPath, dest);
+      console.error(`💾 Saved failed chunk to: ${dest}`);
+
+      // Salvar também um arquivo de log com informações do erro
+      const logFilename = destFilename.replace(chunkExt, '_error.log');
+      const logPath = path.join(failedDir, logFilename);
+
+      const logContent = [
+        `Failed Chunk Analysis`,
+        `=====================`,
+        `Timestamp: ${new Date().toISOString()}`,
+        `Transcription ID: ${transcriptionId || 'N/A'}`,
+        `Chunk Number: ${chunkNumber}`,
+        `Original Path: ${chunkPath}`,
+        `Exit Code: ${exitCode !== null ? exitCode : 'N/A'}`,
+        ``,
+        `Error Output:`,
+        `-------------`,
+        errorOutput || '(no error output)',
+        ``
+      ].join('\n');
+
+      await fs.writeFile(logPath, logContent, 'utf-8');
+      console.error(`📝 Saved error log to: ${logPath}`);
+
+    } catch (saveError) {
+      console.error(`⚠️ Failed to save failed chunk:`, saveError);
+      // Não lançar erro aqui - o erro original é mais importante
+    }
+  }
+
+  /**
+   * Executa o script Python de transcrição com melhor gestão de memória
+   * Usa arquivo temporário para stdout (evita acumular em memória)
+   * Limita stderr a 100KB (circular buffer)
+   */
+  private runPythonScript(
+    videoPath: string,
+    modelSize: string,
+    transcriptionId: string,
+    timeout: number = 30 * 60 * 1000 // 30 minutos padrão
+  ): Promise<PythonTranscriptionResult> {
+    return new Promise(async (resolve, reject) => {
+      const pythonScript = path.join(__dirname, '../../python/transcribe.py');
+      const pythonPath = process.env.PYTHON_PATH || 'python3';
+
+      // Criar arquivo temporário para stdout
+      const tempOutputFile = path.join(os.tmpdir(), `transcription_${transcriptionId}_${Date.now()}.json`);
+      let outputStream: WriteStream | null = null;
+      let outputSize = 0;
+      let useFileOutput = false;
+
+      console.log(`🐍 Executing Python script: ${pythonScript}`);
+      console.log(`🐍 Using Python binary: ${pythonPath}`);
+      console.log(`🐍 Script exists: ${require('fs').existsSync(pythonScript)}`);
+      console.log(`🐍 Full command: ${pythonPath} ${pythonScript} ${videoPath} ${modelSize}`);
+
+      // Debug: verificar se FFMPEG_PATH está disponível
+      if (process.env.FFMPEG_PATH) {
+        console.log(`🔍 [DEBUG] FFMPEG_PATH (Node): ${process.env.FFMPEG_PATH}`);
+      } else {
+        console.warn(`⚠️ [DEBUG] FFMPEG_PATH não definido no .env`);
+      }
+
+      sendProgress(transcriptionId, 15, 'Iniciando script Python...');
+
+      // Configurar processo Python (com -B para não usar .pyc cache)
+      const pythonProcess: ChildProcess = spawn(pythonPath, ['-B', pythonScript, videoPath, modelSize], {
+        env: {
+          ...process.env,
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+          // Garantir que FFMPEG_PATH seja passado explicitamente
+          FFMPEG_PATH: process.env.FFMPEG_PATH || '',
+          FFMPEG_BIN: process.env.FFMPEG_PATH || '',
+          // Removido: PYTHONMALLOC e MALLOC_* (causam problemas no Windows com libs nativas C++)
+        },
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'] // stdin ignorado, stdout e stderr em pipe
+      });
+
+      // Buffer para outputs pequenos (até MAX_MEMORY_OUTPUT)
+      let outputBuffer: Buffer[] = [];
+
+      // Circular buffer para stderr (últimos 100KB)
+      let stderrBuffer: string[] = [];
+      let stderrSize = 0;
+
+      let timeoutHandle: NodeJS.Timeout;
+
+      // Função para limpar recursos
+      const cleanup = async () => {
+        clearTimeout(timeoutHandle);
+        if (outputStream) {
+          outputStream.end();
+          outputStream = null;
+        }
+      };
+
+      // Configurar timeout
+      timeoutHandle = setTimeout(async () => {
+        console.error(`❌ Process timeout after ${timeout/1000/60} minutes`);
+        await cleanup();
+        pythonProcess.kill('SIGTERM');
+        // Remover arquivo temporário se existir
+        try { await fs.unlink(tempOutputFile); } catch {}
+        reject(new Error(`Process timeout. File too large to process in ${timeout/1000/60} minutes.`));
+      }, timeout);
+
+      pythonProcess.stdout?.on('data', (chunk: Buffer) => {
+        outputSize += chunk.length;
+
+        // Se output ainda é pequeno, manter em memória
+        if (!useFileOutput && outputSize <= this.MAX_MEMORY_OUTPUT) {
+          outputBuffer.push(chunk);
+        } else {
+          // Migrar para arquivo se ultrapassar limite
+          if (!useFileOutput) {
+            useFileOutput = true;
+            console.warn(`⚠️ Large output detected (>${this.MAX_MEMORY_OUTPUT} bytes). Switching to file-based output.`);
+            outputStream = createWriteStream(tempOutputFile);
+
+            // Escrever buffer acumulado no arquivo
+            for (const buf of outputBuffer) {
+              outputStream.write(buf);
+            }
+            outputBuffer = []; // Liberar memória
+          }
+
+          // Escrever novo chunk no arquivo
+          outputStream?.write(chunk);
+        }
+
+        // Hard limit de 500MB (segurança)
+        if (outputSize > 500 * 1024 * 1024) {
+          console.error('❌ Output too large (>500MB), killing process');
+          cleanup();
+          pythonProcess.kill('SIGTERM');
+          reject(new Error('Output too large. The transcription is too big to process.'));
+        }
+      });
+
+      pythonProcess.stderr?.on('data', (data: Buffer) => {
+        const message = data.toString('utf-8');
+
+        // Circular buffer: manter apenas últimos MAX_STDERR_SIZE bytes
+        stderrBuffer.push(message);
+        stderrSize += message.length;
+
+        // Remover mensagens antigas se ultrapassar limite
+        while (stderrSize > this.MAX_STDERR_SIZE && stderrBuffer.length > 1) {
+          const removed = stderrBuffer.shift();
+          if (removed) stderrSize -= removed.length;
+        }
+
+        // Log apenas linhas importantes (não tudo)
+        if (message.includes('PROGRESS:') || message.includes('Error') || message.includes('GPU') || message.includes('WARNING')) {
+          console.log(`Python stderr: ${message.trim()}`);
+        }
+
+        // Detectar mensagens de progresso
+        const progressMatch = message.match(/PROGRESS:(\d+):(.+)/);
+        if (progressMatch) {
+          const progress = parseInt(progressMatch[1]);
+          const status = progressMatch[2].trim();
+          sendProgress(transcriptionId, progress, status);
+        }
+
+        // Detectar avisos importantes
+        if (message.includes('Very large text')) {
+          console.warn('⚠️ Very large transcription detected');
+        }
+        if (message.includes('GPU')) {
+          if (message.includes('cuda')) {
+            console.log('🚀 GPU detectada e ativa!');
+          } else {
+            console.log('⚠️ Rodando em CPU (sem GPU)');
+          }
+        }
+      });
+
+      pythonProcess.on('close', async (code: number | null) => {
+        await cleanup();
+        const errorOutput = stderrBuffer.join('');
+        console.log(`🔚 Python process closed with code: ${code}`);
+
+        // Detectar erros específicos do Windows
+        if (code === 3221226505 || code === -1073740791) {
+          console.error('❌ Stack buffer overrun (0xC0000409)');
+          try { await fs.unlink(tempOutputFile); } catch {}
+          reject(new Error('Stack overflow durante processamento. Use um modelo menor ou divida o arquivo.'));
+          return;
+        }
+
+        if (code === 3221225477 || code === -1073741819) {
+          console.error('❌ Access violation (0xC0000005)');
+          try { await fs.unlink(tempOutputFile); } catch {}
+          reject(new Error('Erro de acesso à memória. O arquivo pode estar corrompido.'));
+          return;
+        }
+
+        if (code === 0) {
+          try {
+            let outputString: string;
+
+            // Ler output do arquivo ou memória
+            if (useFileOutput) {
+              console.log(`📂 Reading output from temp file: ${tempOutputFile}`);
+              outputString = await fs.readFile(tempOutputFile, 'utf-8');
+              // Deletar arquivo temporário
+              await fs.unlink(tempOutputFile);
+            } else {
+              outputString = Buffer.concat(outputBuffer).toString('utf-8');
+              outputBuffer = []; // Liberar memória
+            }
+
+            console.log(`📊 Output size: ${outputString.length} bytes (from ${useFileOutput ? 'file' : 'memory'})`);
+
+            // Parse do resultado
+            const result = JSON.parse(outputString);
+
+            // Verificar se resultado usa arquivo
+            if (result.text_file) {
+              console.log(`📁 Result saved to file: ${result.text_file}`);
+              sendProgress(transcriptionId, 90, 'Processando arquivo de resultado...');
+            } else {
+              sendProgress(transcriptionId, 90, 'Processamento concluído!');
+            }
+
+            resolve(result);
+          } catch (e) {
+            console.error('❌ Failed to parse Python output:', e);
+            console.error('Output size:', outputSize, 'bytes');
+            try { await fs.unlink(tempOutputFile); } catch {}
+
+            // Tentar extrair informação útil do erro
+            if (errorOutput.includes('MemoryError')) {
+              reject(new Error('Python ran out of memory. Use a smaller model.'));
+            } else {
+              reject(new Error('Failed to parse transcription result.'));
+            }
+          }
+        } else if (code === null) {
+          try { await fs.unlink(tempOutputFile); } catch {}
+          reject(new Error('Process was terminated (possibly out of memory)'));
+        } else {
+          try { await fs.unlink(tempOutputFile); } catch {}
+          console.error(`❌ Python script exited with code: ${code}`);
+          console.error(`❌ Error output (last 1000 chars): ${errorOutput.slice(-1000)}`);
+
+          // Extrair mensagem de erro mais útil
+          const errorMatch = errorOutput.match(/Error: (.+)/);
+          const errorMessage = errorMatch ? errorMatch[1] : 'Python script failed';
+
+          reject(new Error(errorMessage));
+        }
+      });
+
+      pythonProcess.on('error', async (error: Error) => {
+        await cleanup();
+        try { await fs.unlink(tempOutputFile); } catch {}
+        console.error('❌ Failed to start Python process:', error);
+        sendProgress(transcriptionId, 0, 'Erro ao executar Python');
+        reject(error);
+      });
+
+      // Monitorar uso de memória periodicamente
+      const memoryMonitor = setInterval(() => {
+        const usage = process.memoryUsage();
+        const usedMB = Math.round(usage.heapUsed / 1024 / 1024);
+        const totalMB = Math.round(usage.heapTotal / 1024 / 1024);
+
+        if (usedMB > 1000) {
+          console.warn(`⚠️ High memory usage: ${usedMB}MB / ${totalMB}MB`);
+        }
+
+        // Se memória muito alta, considerar matar processo
+        if (usedMB > 2000) {
+          console.error('❌ Memory limit exceeded, killing process');
+          clearInterval(memoryMonitor);
+          pythonProcess.kill('SIGTERM');
+        }
+      }, 5000);
+
+      // Limpar monitor quando processo terminar
+      pythonProcess.on('exit', () => {
+        clearInterval(memoryMonitor);
+      });
+    });
+  }
+}

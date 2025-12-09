@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  # ============================================
+  # Backend Node.js + Python (com GPU)
+  # ============================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: sdc-transcription-backend
+    restart: unless-stopped
+    environment:
+      # Database
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@database:5432/${DB_NAME}
+
+      # Server
+      PORT: 8000
+      NODE_ENV: production
+      SERVER_TIMEOUT: 3600000
+
+      # Python
+      PYTHON_PATH: /app/venv/bin/python3
+
+      # File Upload
+      UPLOAD_DIR: /app/uploads
+      MAX_FILE_SIZE: 2147483648
+
+      # CORS
+      CORS_ORIGIN: "*"
+
+      # FFmpeg (já no PATH do container)
+      FFMPEG_PATH: ffmpeg
+      FFPROBE_PATH: ffprobe
+    volumes:
+      - uploads:/app/uploads
+      - logs:/app/logs
+    ports:
+      - "8000:8000"
+    networks:
+      - sdc-network
+      - bridge
+    #depends_on:
+      #database:
+        #condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================
+  # Frontend React + Nginx
+  # ============================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://192.168.16.114:8000}
+    container_name: sdc-transcription-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    networks:
+      - sdc-network
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  sdc-network:
+    driver: bridge
+
+  bridge:
+    external: true
+    name: bridge
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  postgres_data:
+    driver: local
+  uploads:
+    driver: local
+  logs:
+    driver: local

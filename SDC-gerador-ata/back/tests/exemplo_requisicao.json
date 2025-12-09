@@ -1,0 +1,4 @@
+{
+  "dados_toon": "local: Sala de Reuniões SDC\ndata_horario: 13/11/2025 - 14:00 às 15:30\nconvocado_por: Jonathan Silva\nobjetivo: Demonstração de processo para geração de atas via transcrição automática\n\nparticipantes[3]{num,nome}:\n1,Jonathan Silva\n2,Everton Santos\n3,Maria Costa\n\npontos[3]{item,topico}:\n1,Gravação utilizando OBS configurado para salvar vídeos em formato MP4\n2,Compressão de arquivo reduzindo de 956MB para 69MB usando Clipchamp\n3,Transcrição automática via Word Online com limite de 300MB/mês\n\nproximos_passos[2]{item,acao,responsavel,data}:\n1,Padronizar procedimento para todas as gravações internas,Jonathan Silva,20/11/2025\n2,Compartilhar tutorial com colaboradores,Everton Santos,25/11/2025",
+  "nome_arquivo": "Ata_Reuniao_Exemplo"
+}
