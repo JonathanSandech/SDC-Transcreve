@@ -1,0 +1,347 @@
+"""
+Serviço de comunicação com Ollama para geração de atas
+SDC-Ata-Generator
+"""
+
+import requests
+import logging
+import time
+from typing import Tuple
+
+try:
+    from . import config_ata as config
+    from .prompts import criar_prompt_extracao, criar_prompt_construcao, criar_prompt_correcao_toon
+    from .toon_parser import parse_toon, TOONParserError
+except ImportError:
+    import config_ata as config
+    from prompts import criar_prompt_extracao, criar_prompt_construcao, criar_prompt_correcao_toon
+    from toon_parser import parse_toon, TOONParserError
+
+
+logger = logging.getLogger(__name__)
+
+
+class OllamaServiceError(Exception):
+    """Exceção para erros do serviço Ollama"""
+    pass
+
+
+class OllamaService:
+    """Serviço para gerar atas usando Ollama"""
+
+    def __init__(self):
+        self.base_url = config.OLLAMA_BASE_URL
+        self.model = config.OLLAMA_MODEL
+        self.timeout = config.OLLAMA_TIMEOUT
+        self.temperature = config.OLLAMA_TEMPERATURE
+        self.max_tokens = config.OLLAMA_MAX_TOKENS
+        self.top_p = config.OLLAMA_TOP_P
+
+    def check_health(self) -> bool:
+        """Verifica se Ollama está online"""
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            return response.status_code == 200
+        except Exception as e:
+            logger.warning(f"Ollama não disponível: {e}")
+            return False
+
+    def list_models(self) -> list:
+        """Lista modelos disponíveis no Ollama"""
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                return [model['name'] for model in data.get('models', [])]
+            return []
+        except Exception as e:
+            logger.error(f"Erro ao listar modelos: {e}")
+            return []
+
+    def generate_completion(self, prompt: str) -> str:
+        """Envia prompt para Ollama e retorna resposta"""
+        try:
+            # Log detalhado do prompt
+            prompt_size = len(prompt)
+            prompt_preview = prompt[:200].replace('\n', ' ')
+            logger.info("="*60)
+            logger.info(f"📊 INICIANDO GERAÇÃO COM OLLAMA")
+            logger.info(f"   Modelo: {self.model}")
+            logger.info(f"   Tamanho do prompt: {prompt_size:,} caracteres")
+            logger.info(f"   Preview: {prompt_preview}...")
+            logger.info(f"   Temperature: {self.temperature}")
+            logger.info(f"   Top P: {self.top_p}")
+            logger.info(f"   Max tokens: {self.max_tokens}")
+            logger.info("="*60)
+
+            payload = {
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": self.temperature,
+                    "top_p": self.top_p,
+                    "num_predict": self.max_tokens
+                }
+            }
+
+            # Marcar início da geração
+            start_time = time.time()
+            logger.info("⏱️  Enviando requisição para Ollama...")
+
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=self.timeout
+            )
+
+            # Calcular tempo decorrido
+            elapsed_time = time.time() - start_time
+
+            if response.status_code != 200:
+                logger.error(f"❌ Ollama retornou erro {response.status_code}")
+                raise OllamaServiceError(
+                    f"Ollama retornou status {response.status_code}: {response.text}"
+                )
+
+            data = response.json()
+            generated_text = data.get('response', '')
+
+            if not generated_text:
+                logger.error("❌ Ollama retornou resposta vazia")
+                raise OllamaServiceError("Ollama retornou resposta vazia")
+
+            # Log detalhado da resposta
+            response_size = len(generated_text)
+            response_preview = generated_text[:200].replace('\n', ' ')
+
+            # Extrair estatísticas se disponíveis
+            total_duration = data.get('total_duration', 0) / 1_000_000_000  # Converter de ns para s
+            eval_count = data.get('eval_count', 0)  # Tokens gerados
+            eval_duration = data.get('eval_duration', 0) / 1_000_000_000
+
+            tokens_per_sec = eval_count / eval_duration if eval_duration > 0 else 0
+
+            logger.info("="*60)
+            logger.info(f"✅ RESPOSTA RECEBIDA DO OLLAMA")
+            logger.info(f"   Tempo total: {elapsed_time:.2f}s")
+            logger.info(f"   Tamanho da resposta: {response_size:,} caracteres")
+            logger.info(f"   Tokens gerados: {eval_count}")
+            logger.info(f"   Velocidade: {tokens_per_sec:.1f} tokens/s")
+            logger.info(f"   Preview: {response_preview}...")
+            logger.info("="*60)
+
+            # PRINT COMPLETO DO OUTPUT DA IA
+            # Output completo removido para logs mais limpos
+            # Se precisar debug, descomente as linhas abaixo:
+            # print("\n" + "🤖"*40)
+            # print("🤖 OUTPUT COMPLETO DA IA:")
+            # print("🤖"*40)
+            # print(generated_text)
+            # print("🤖"*40 + "\n")
+
+            return generated_text.strip()
+
+        except requests.exceptions.Timeout:
+            raise OllamaServiceError(
+                f"Timeout ao aguardar resposta do Ollama ({self.timeout}s)"
+            )
+        except requests.exceptions.ConnectionError:
+            raise OllamaServiceError(
+                f"Não foi possível conectar ao Ollama em {self.base_url}"
+            )
+        except Exception as e:
+            raise OllamaServiceError(f"Erro ao gerar completion: {str(e)}")
+
+    def gerar_toon_from_dados(
+        self,
+        participantes: str,
+        data_hora: str,
+        local: str,
+        convocado_por: str,
+        transcricao: str,
+        max_retries: int = 2
+    ) -> Tuple[str, dict]:
+        """
+        Gera TOON estruturado a partir dos dados da reunião
+        """
+        # Log inicial com estatísticas
+        transcricao_size = len(transcricao)
+        logger.info("\n" + "="*70)
+        logger.info("🤖 INICIANDO GERAÇÃO DE ATA COM IA")
+        logger.info("="*70)
+        logger.info(f"📏 Tamanho da transcrição: {transcricao_size:,} caracteres")
+        logger.info(f"👥 Participantes: {participantes}")
+        logger.info(f"📅 Data/Hora: {data_hora}")
+        logger.info(f"📍 Local: {local}")
+        logger.info(f"📢 Convocado por: {convocado_por}")
+        logger.info(f"🔄 Máximo de tentativas: {max_retries + 1}")
+        logger.info("="*70 + "\n")
+
+        # ===================================================================
+        # FASE 1: EXTRAÇÃO FIEL DOS TÓPICOS DA TRANSCRIÇÃO
+        # ===================================================================
+        logger.info("\n" + "🔵"*35)
+        logger.info("🔵 FASE 1: EXTRAÇÃO FIEL DE TÓPICOS")
+        logger.info("🔵"*35)
+
+        prompt_extracao = criar_prompt_extracao(transcricao)
+        logger.info(f"📝 Prompt de extração criado: {len(prompt_extracao):,} caracteres")
+
+        lista_extraida = self.generate_completion(prompt_extracao)
+
+        logger.info("="*70)
+        logger.info("✅ FASE 1 CONCLUÍDA - Lista extraída com sucesso")
+        logger.info(f"   📏 Tamanho da lista: {len(lista_extraida):,} caracteres")
+        logger.info(f"   📋 Preview: {lista_extraida[:150].replace(chr(10), ' ')}...")
+        logger.info("="*70 + "\n")
+
+        # ===================================================================
+        # FASE 2: CONSTRUÇÃO DO TOON A PARTIR DA LISTA EXTRAÍDA
+        # ===================================================================
+        logger.info("🟢"*35)
+        logger.info("🟢 FASE 2: CONSTRUÇÃO DO TOON")
+        logger.info("🟢"*35 + "\n")
+
+        prompt_atual = None  # Controle de prompt (construção ou correção)
+
+        for tentativa in range(max_retries + 1):
+            try:
+                logger.info(f"\n🔄 TENTATIVA {tentativa + 1}/{max_retries + 1}")
+                logger.info("-"*70)
+
+                # Se não há prompt de correção pendente, criar prompt de construção
+                if prompt_atual is None:
+                    prompt_atual = criar_prompt_construcao(
+                        lista_extraida,
+                        participantes,
+                        data_hora,
+                        local,
+                        convocado_por
+                    )
+                    logger.info(f"📝 Prompt de construção criado: {len(prompt_atual):,} caracteres")
+                else:
+                    logger.info(f"🔧 Usando prompt de correção: {len(prompt_atual):,} caracteres")
+
+                # Gerar TOON
+                toon_gerado = self.generate_completion(prompt_atual)
+
+                # Limpar markdown
+                logger.info("🧹 Limpando markdown da resposta...")
+                toon_gerado = self._limpar_markdown(toon_gerado)
+                logger.info(f"   TOON limpo: {len(toon_gerado):,} caracteres")
+
+                # PRINT DO TOON LIMPO
+                # TOON limpo removido para logs mais limpos
+                # Se precisar debug, descomente as linhas abaixo:
+                # print("\n" + "📄"*40)
+                # print("📄 TOON APÓS LIMPEZA DE MARKDOWN:")
+                # print("📄"*40)
+                # print(toon_gerado)
+                # print("📄"*40 + "\n")
+
+                # Log do TOON gerado (primeiras linhas)
+                toon_preview = '\n'.join(toon_gerado.split('\n')[:10])
+                logger.debug(f"📄 Preview do TOON gerado:\n{toon_preview}\n...")
+
+                # Tentar parsear
+                logger.info("🔍 Parseando TOON...")
+                dados_parseados = parse_toon(toon_gerado)
+
+                # Extrair estatísticas
+                num_pontos = len(dados_parseados.get('pontos', []))
+                num_proximos_passos = len(dados_parseados.get('proximos_passos', []))
+
+                logger.info("="*70)
+                logger.info("✅ SUCESSO! ATA GERADA COM SUCESSO (FASE 2 CONCLUÍDA)")
+                logger.info(f"   📊 Pontos discutidos: {num_pontos}")
+                logger.info(f"   📋 Próximos passos: {num_proximos_passos}")
+                logger.info(f"   🎯 Tentativa bem-sucedida: {tentativa + 1}/{max_retries + 1}")
+                logger.info("="*70 + "\n")
+
+                return toon_gerado, dados_parseados
+
+            except TOONParserError as e:
+                logger.warning("="*70)
+                logger.warning(f"⚠️  ERRO NO PARSE (tentativa {tentativa + 1})")
+                logger.warning(f"   Erro: {str(e)}")
+                logger.warning("="*70)
+
+                if tentativa < max_retries:
+                    logger.info(f"🔧 Tentando corrigir TOON (tentativa {tentativa + 2}/{max_retries + 1})...")
+                    prompt_atual = criar_prompt_correcao_toon(toon_gerado, str(e))
+                else:
+                    logger.error("="*70)
+                    logger.error("❌ FALHA TOTAL - Todas as tentativas esgotadas")
+                    logger.error(f"   Total de tentativas: {max_retries + 1}")
+                    logger.error(f"   Último erro: {e}")
+                    logger.error("="*70)
+                    raise OllamaServiceError(
+                        f"Não foi possível gerar TOON válido após {max_retries + 1} tentativas. "
+                        f"Último erro: {e}"
+                    )
+
+            except OllamaServiceError:
+                raise
+
+            except Exception as e:
+                logger.error("="*70)
+                logger.error(f"❌ ERRO INESPERADO: {type(e).__name__}")
+                logger.error(f"   Detalhes: {str(e)}")
+                logger.error("="*70)
+                raise OllamaServiceError(f"Erro ao processar: {str(e)}")
+
+        raise OllamaServiceError("Falha ao gerar TOON válido")
+
+    def _limpar_markdown(self, texto: str) -> str:
+        """Remove marcadores markdown e texto extra da resposta do LLM"""
+        # Remover blocos de código ```
+        if '```' in texto:
+            linhas = texto.split('\n')
+            resultado = []
+            dentro_bloco = False
+
+            for linha in linhas:
+                stripped = linha.strip()
+                if stripped.startswith('```'):
+                    dentro_bloco = not dentro_bloco
+                    continue
+                resultado.append(linha)
+
+            texto = '\n'.join(resultado)
+
+        # Remover linhas que começam com # (headers markdown)
+        linhas = texto.split('\n')
+        linhas = [l for l in linhas if not l.strip().startswith('#')]
+        texto = '\n'.join(linhas)
+
+        # Remover ** (bold markdown)
+        texto = texto.replace('**', '')
+
+        # Encontrar onde começa o TOON real (primeira linha com "local:")
+        linhas = texto.split('\n')
+        inicio_toon = 0
+        for i, linha in enumerate(linhas):
+            if linha.strip().startswith('local:'):
+                inicio_toon = i
+                break
+
+        texto = '\n'.join(linhas[inicio_toon:])
+
+        return texto.strip()
+
+
+ollama_service = OllamaService()
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+
+    print("Testando OllamaService...")
+    service = OllamaService()
+
+    if service.check_health():
+        print("✓ Ollama está online")
+        print(f"✓ Modelos: {service.list_models()}")
+    else:
+        print("✗ Ollama não está disponível")

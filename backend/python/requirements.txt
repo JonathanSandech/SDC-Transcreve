@@ -1,0 +1,15 @@
+# Dependências para transcrição de áudio/vídeo
+# Script: transcribe.py
+
+# Processamento de vídeo/áudio
+moviepy>=1.0.3
+
+# Whisper otimizado com GPU
+faster-whisper>=1.0.0
+
+# PyTorch (para GPU CUDA)
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Dependências opcionais mas recomendadas
+numpy>=1.24.0
