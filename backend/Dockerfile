@@ -24,7 +24,7 @@ RUN npm run build
 # ============================================
 # Imagem base com PyTorch compilado para ROCm (AMD)
 # Ideal: fixar uma tag específica compatível com a versão de ROCm do host.
-FROM rocm/pytorch:latest
+FROM rocm/pytorch:rocm7.1_ubuntu22.04_py3.10_pytorch_release_2.9.1
 
 # Metadados
 LABEL maintainer="jonathan.barbosa"

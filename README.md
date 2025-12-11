@@ -11,8 +11,8 @@ Sistema de transcrição automática de vídeos usando IA (Whisper).
 ## Tecnologias
 - Backend: Node.js + TypeScript + PostgreSQL
 - Frontend: React + TypeScript + Tailwind CSS
-- IA: Faster Whisper (GPU CUDA)
-- Infraestrutura: GPU NVIDIA RTX 3060
+- IA: Faster Whisper (GPU AMD ROCm)
+- Infraestrutura: GPU AMD (Ex: RX 6600, RX 7800 XT)
 
 ## Recursos
 - Transcrição com GPU (5-10x mais rápida)

@@ -3,7 +3,7 @@
 """
 Script de transcrição otimizado para arquivos grandes
 Usa streaming e processamento incremental para evitar stack overflow
-Otimizações: faster-whisper com suporte AMD ROCm
+Otimizações: openai-whisper com suporte AMD ROCm
 """
 
 import sys
@@ -16,8 +16,8 @@ import tempfile
 import subprocess
 from pathlib import Path
 from moviepy import VideoFileClip, AudioFileClip
-from faster_whisper import WhisperModel
 import torch
+import whisper
 
 # Forçar UTF-8 no stdout e stderr ANTES de qualquer print
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -60,11 +60,11 @@ def prepare_audio(input_path):
         send_progress(10, "Extraindo áudio do vídeo...")
 
         audio_path = input_path.rsplit('.', 1)[0] + '.mp3'
-        
+
         video = VideoFileClip(input_path)
         video.audio.write_audiofile(audio_path, logger=None)
         video.close()
-        
+
         print(f"✅ Audio extracted to: {audio_path}", file=sys.stderr)
         send_progress(15, "Áudio extraído com sucesso")
         return audio_path, True
@@ -79,15 +79,11 @@ def check_ffmpeg_installed():
     Search order:
     1. FFMPEG_PATH environment variable (explicitly set by Node.js)
     2. IMAGEIO_FFMPEG_EXE environment variable (used by moviepy/imageio_ffmpeg)
-    3. Bundled imageio_ffmpeg binary (same as moviepy uses)
-    4. Common Windows installation paths
-    5. System PATH ('ffmpeg')
+    3. System PATH ('ffmpeg')
 
     Returns:
         str: Path to working ffmpeg executable, or None if not found
     """
-    from pathlib import Path
-
     # Priority 1: FFMPEG_PATH env var (set by Node.js service)
     ffmpeg_env = os.environ.get('FFMPEG_PATH')
     if ffmpeg_env:
@@ -112,45 +108,7 @@ def check_ffmpeg_installed():
         except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError) as e:
             print(f"⚠️ IMAGEIO_FFMPEG_EXE set but invalid ({imageio_env}): {e}", file=sys.stderr)
 
-    # Priority 3: Bundled imageio_ffmpeg binary (same as moviepy uses)
-    try:
-        site_packages = Path(sys.prefix) / 'Lib' / 'site-packages'
-        bundled_ffmpeg = site_packages / 'imageio_ffmpeg' / 'binaries' / 'ffmpeg-win-x86_64-v7.1.exe'
-
-        if bundled_ffmpeg.exists():
-            bundled_str = str(bundled_ffmpeg)
-            try:
-                result = subprocess.run([bundled_str, '-version'],
-                                        capture_output=True, text=True, timeout=5)
-                if result.returncode == 0:
-                    print(f"✅ Found bundled ffmpeg (moviepy): {bundled_str}", file=sys.stderr)
-                    return bundled_str
-            except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
-                pass
-    except Exception as e:
-        print(f"⚠️ Could not check bundled ffmpeg: {e}", file=sys.stderr)
-
-    # Priority 4: Common Windows paths (including actual WinGet path)
-    possible_paths = [
-        r'C:\Users\jonathan.barbosa\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe',  # Actual WinGet path
-        r'C:\ffmpeg\bin\ffmpeg.exe',  # Manual install
-        r'C:\ProgramData\chocolatey\bin\ffmpeg.exe',  # Chocolatey
-        os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'WinGet', 'Packages',
-                     'Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe', 'ffmpeg-8.0.1-full_build',
-                     'bin', 'ffmpeg.exe'),  # Winget package directory
-    ]
-
-    for ffmpeg_path in possible_paths:
-        try:
-            result = subprocess.run([ffmpeg_path, '-version'],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                print(f"✅ Found ffmpeg at: {ffmpeg_path}", file=sys.stderr)
-                return ffmpeg_path
-        except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
-            continue
-
-    # Priority 5: System PATH
+    # Priority 3: System PATH
     try:
         result = subprocess.run(['ffmpeg', '-version'],
                                 capture_output=True, text=True, timeout=5)
@@ -247,25 +205,15 @@ def get_whisper_options(duration):
 
 def transcribe_audio_streaming(audio_path, model_size='medium'):
     """
-    Transcreve áudio usando faster-whisper
+    Transcreve áudio usando openai-whisper
     Suporta GPU AMD via ROCm
     """
     try:
         send_progress(5, "Iniciando transcrição...")
 
-        # FORÇAR CPU: faster-whisper/ctranslate2 não é compatível com ROCm
-        # Ainda assim é MUITO mais rápido que openai-whisper em CPU
+        # WORKAROUND: Forçar CPU para evitar crash no driver AMD
         device = "cpu"
-        print("⚠️ Using CPU mode (faster-whisper is not ROCm-compatible, but still faster than alternatives)", file=sys.stderr)
-
-        print(f"Using device: {device}", file=sys.stderr)
-        if device == "cuda":
-            print(f"GPU: {torch.cuda.get_device_name(0)}", file=sys.stderr)
-            try:
-                free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
-                print(f"GPU Free Memory: {free_memory / 1024**3:.2f} GB", file=sys.stderr)
-            except:
-                print("GPU info not available", file=sys.stderr)
+        print(f"🖥️ WORKAROUND: Forcing CPU to avoid AMD driver crash. Using device: {device}", file=sys.stderr)
 
         # Obter duração e opções
         duration = get_duration(audio_path)
@@ -273,26 +221,8 @@ def transcribe_audio_streaming(audio_path, model_size='medium'):
 
         send_progress(10, "Carregando modelo de IA...")
 
-        # Escolher compute_type baseado no device
-        # float16 para GPU, int8 para CPU (melhor performance)
-        compute_type = "float16" if device == "cuda" else "int8"
-
-        # Carregar modelo faster-whisper
-        print(f"Loading faster-whisper model: {model_size} (compute_type={compute_type})", file=sys.stderr)
-
-        # DEBUG: Environment antes de carregar modelo
-        print(f"🔍 [DEBUG] About to load WhisperModel...", file=sys.stderr)
-        print(f"🔍 [DEBUG] model_size={model_size}, device={device}, compute_type={compute_type}", file=sys.stderr)
-        print(f"🔍 [DEBUG] HOME={os.getenv('HOME')}", file=sys.stderr)
-        print(f"🔍 [DEBUG] HF_HOME={os.getenv('HF_HOME')}", file=sys.stderr)
-        print(f"🔍 [DEBUG] TORCH_HOME={os.getenv('TORCH_HOME')}", file=sys.stderr)
-        print(f"🔍 [DEBUG] PWD={os.getcwd()}", file=sys.stderr)
-        sys.stderr.flush()
-
-        model = WhisperModel(model_size, device=device, compute_type=compute_type)
-
-        print(f"🔍 [DEBUG] WhisperModel loaded successfully!", file=sys.stderr)
-        sys.stderr.flush()
+        # Carregar modelo whisper
+        model = whisper.load_model(model_size, device=device)
 
         send_progress(20, "Modelo carregado, iniciando transcrição...")
 
@@ -300,46 +230,28 @@ def transcribe_audio_streaming(audio_path, model_size='medium'):
         print(f"Starting transcription...", file=sys.stderr)
         send_progress(30, "Processando transcrição...")
 
-        segments, info = model.transcribe(
+        fp16 = device == "cuda"
+
+        result = model.transcribe(
             audio_path,
-            language=options['language'],
+            language="pt",
+            fp16=fp16,
             beam_size=options.get('beam_size', 5),
             condition_on_previous_text=options['condition_on_previous_text'],
-            temperature=options['temperature']
+            temperature=options['temperature'],
+            verbose=False
         )
 
-        # Concatenar todos os segmentos
-        print(f"📊 Detected language: {info.language} (probability: {info.language_probability:.2f})", file=sys.stderr)
+        text = result["text"].strip()
 
-        text_parts = []
-        segment_count = 0
-        for segment in segments:
-            text_parts.append(segment.text)
-            segment_count += 1
-            if segment_count % 10 == 0:
-                print(f"📝 Processed {segment_count} segments...", file=sys.stderr)
-
-        text = " ".join(text_parts).strip()
-
-        print(f"📊 Transcription completed: {len(text)} characters from {segment_count} segments", file=sys.stderr)
+        print(f"📊 Transcription completed: {len(text)} characters", file=sys.stderr)
         send_progress(92, "Finalizando transcrição...")
 
         # Limpar modelo da memória
-        if device == "cuda":
-            try:
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-            except Exception as e:
-                print(f"⚠️ Erro ao limpar cache GPU: {e}", file=sys.stderr)
-
         del model
         gc.collect()
-
         if device == "cuda":
-            try:
-                torch.cuda.empty_cache()
-            except Exception as e:
-                print(f"⚠️ Erro ao limpar cache GPU (post-cleanup): {e}", file=sys.stderr)
+            torch.cuda.empty_cache()
 
         send_progress(95, "Transcrição concluída!")
 
@@ -406,22 +318,15 @@ def transcribe_simple(audio_path, model_size='medium'):
     try:
         send_progress(10, "Iniciando transcrição (modo simples)...")
 
-        # Detectar GPU (ROCm aparece como CUDA no PyTorch)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"🖥️  Using device: {device}", file=sys.stderr)
+        # WORKAROUND: Forçar CPU para evitar crash no driver AMD
+        device = "cpu"
+        print(f"🖥️ WORKAROUND: Forcing CPU to avoid AMD driver crash. Using device: {device}", file=sys.stderr)
 
         # Obter duração
         duration = get_duration(audio_path)
         print(f"📊 Audio duration: {duration:.2f}s ({duration/60:.2f}min)", file=sys.stderr)
 
         send_progress(20, "Carregando modelo...")
-
-        # Verificar se há memória GPU suficiente antes de carregar modelo
-        if device == "cuda" and not check_gpu_memory(2.0):
-            print(f"⚠️ Insufficient GPU memory. Waiting 5s and retrying...", file=sys.stderr)
-            time.sleep(5)
-            if not check_gpu_memory(2.0):
-                raise Exception("Insufficient GPU memory. Please wait for previous processes to finish.")
 
         # Carregar modelo Whisper oficial
         print(f"Loading Whisper model: {model_size}", file=sys.stderr)
@@ -488,8 +393,9 @@ def transcribe_with_chunking(audio_path, model_size, duration):
         print(f"📊 Processing {total_chunks} chunks of {chunk_duration}s each", file=sys.stderr)
         send_progress(10, f"Processando {total_chunks} chunks...")
 
-        # Detectar GPU
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # WORKAROUND: Forçar CPU para evitar crash no driver AMD
+        device = "cpu"
+        print(f"🖥️ WORKAROUND: Forcing CPU to avoid AMD driver crash. Using device: {device}", file=sys.stderr)
 
         # Processar cada chunk
         partial_results = []
@@ -577,7 +483,7 @@ def main():
     if len(sys.argv) < 2:
         print(json.dumps({'success': False, 'error': 'Missing file path argument'}))
         sys.exit(1)
-    
+
     input_path = sys.argv[1]
     model_size = sys.argv[2] if len(sys.argv) > 2 else 'medium'
 
@@ -604,20 +510,20 @@ def main():
     if not os.path.exists(input_path):
         print(json.dumps({'success': False, 'error': 'File not found'}))
         sys.exit(1)
-    
+
     # Mostrar tamanho do arquivo
     file_size = os.path.getsize(input_path)
     print(f"📊 File size: {file_size / 1024**3:.2f} GB", file=sys.stderr)
-    
+
     # Verificar se arquivo é muito grande e sugerir modelo menor
     if file_size > 2 * 1024**3 and model_size == 'large':  # > 2GB com modelo large
         print(f"⚠️ WARNING: Large file with large model. Consider using 'medium' or 'small' model.", file=sys.stderr)
-    
+
     try:
         start_time = time.time()
-        
+
         send_progress(1, "Analisando arquivo...")
-        
+
         # Preparar áudio
         print(f"📂 Processing file: {input_path}", file=sys.stderr)
         audio_path, created_new_file = prepare_audio(input_path)
@@ -644,17 +550,17 @@ def main():
         else:
             print(f"✅ Normal duration ({duration/60:.1f}min): using standard method", file=sys.stderr)
             text = transcribe_audio_streaming(audio_path, model_size)
-        
+
         processing_time = int(time.time() - start_time)
         print(f"⏱️ Total time: {processing_time}s ({processing_time/60:.2f}min)", file=sys.stderr)
-        
+
         send_progress(98, "Preparando resultado...")
-        
+
         # Para textos muito grandes, considerar comprimir ou dividir
         text_size = len(text)
         if text_size > 5_000_000:  # > 5MB de texto
             print(f"⚠️ Very large text ({text_size} chars), consider post-processing", file=sys.stderr)
-        
+
         # Preparar resultado
         result = {
             'success': True,
@@ -664,7 +570,7 @@ def main():
             'input_type': 'audio' if is_audio_file(input_path) else 'video',
             'text_length': text_size
         }
-        
+
         send_progress(100, "Transcrição concluída!")
 
         # Serializar e enviar resultado
@@ -721,7 +627,7 @@ def main():
             except Exception as fallback_error:
                 print(f"❌ Fallback also failed: {str(fallback_error)}", file=sys.stderr)
                 raise json_error
-    
+
     except Exception as e:
         send_progress(0, f"Erro: {str(e)}")
         error_result = {
