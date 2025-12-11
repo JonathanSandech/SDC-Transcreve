@@ -1,8 +1,31 @@
-version: '3.8'
-
 services:
   # ============================================
-  # Backend Node.js + Python (com GPU)
+  # PostgreSQL Database
+  # ============================================
+  database:
+    image: postgres:16-alpine
+    container_name: sdc-transcription-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-transcription_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-transcription_db}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - sdc-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-transcription_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================
+  # Backend Node.js + Python (com GPU AMD ROCm)
   # ============================================
   backend:
     build:
@@ -11,8 +34,8 @@ services:
     container_name: sdc-transcription-backend
     restart: unless-stopped
     environment:
-      # Database
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@database:5432/${DB_NAME}
+      # Database (usa o serviço "database" do compose)
+      DATABASE_URL: postgresql://${DB_USER:-transcription_user}:${DB_PASSWORD}@database:5432/${DB_NAME:-transcription_db}
 
       # Server
       PORT: 8000
@@ -20,7 +43,7 @@ services:
       SERVER_TIMEOUT: 3600000
 
       # Python
-      PYTHON_PATH: /app/venv/bin/python3
+      PYTHON_PATH: python3
 
       # File Upload
       UPLOAD_DIR: /app/uploads
@@ -29,7 +52,7 @@ services:
       # CORS
       CORS_ORIGIN: "*"
 
-      # FFmpeg (já no PATH do container)
+      # FFmpeg
       FFMPEG_PATH: ffmpeg
       FFPROBE_PATH: ffprobe
     volumes:
@@ -39,17 +62,20 @@ services:
       - "8000:8000"
     networks:
       - sdc-network
-      - bridge
-    #depends_on:
-      #database:
-        #condition: service_healthy
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    depends_on:
+      database:
+        condition: service_healthy
+
+    # >>> GPU AMD (ROCm) <<<
+    devices:
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    group_add:
+      - video
+      - "993"  # GID do grupo render do host (acesso aos dispositivos GPU)
+    security_opt:
+      - seccomp=unconfined
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -65,7 +91,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_URL: ${VITE_API_URL:-http://192.168.16.114:8000}
+        # Se for acessar de outra máquina, troque localhost pelo IP do servidor
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     container_name: sdc-transcription-frontend
     restart: unless-stopped
     ports:
@@ -87,17 +114,10 @@ networks:
   sdc-network:
     driver: bridge
 
-  bridge:
-    external: true
-    name: bridge
-
 # ============================================
 # Volumes
 # ============================================
 volumes:
   postgres_data:
-    driver: local
   uploads:
-    driver: local
   logs:
-    driver: local

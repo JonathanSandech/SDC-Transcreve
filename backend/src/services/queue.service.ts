@@ -32,10 +32,9 @@ export class QueueService {
     // Enviar posição inicial via SSE
     sendQueueUpdate(id, position, queueLength);
 
-    // Iniciar processamento se não estiver rodando
-    if (!this.processing || this.currentlyProcessing < this.maxConcurrent) {
-      this.processQueue();
-    }
+    // Iniciar processamento (processQueue já tem as verificações necessárias)
+    console.log(`🔍 [DEBUG] addToQueue -> before processQueue: queue.length=${this.queue.length}, currentlyProcessing=${this.currentlyProcessing}`);
+    this.processQueue();
 
     return position;
   }
@@ -66,7 +65,10 @@ export class QueueService {
    * Processa fila de transcrições
    */
   private async processQueue() {
+    console.log(`🔍 [DEBUG] processQueue() called - queue.length=${this.queue.length}, currentlyProcessing=${this.currentlyProcessing}, maxConcurrent=${this.maxConcurrent}`);
+
     if (this.queue.length === 0) {
+      console.log(`🔍 [DEBUG] Queue is empty, currentlyProcessing=${this.currentlyProcessing}`);
       if (this.currentlyProcessing === 0) {
         this.processing = false;
         console.log('✅ Queue is empty, processing stopped');
@@ -75,10 +77,12 @@ export class QueueService {
     }
 
     if (this.currentlyProcessing >= this.maxConcurrent) {
-      console.log(`⏸️ Max concurrent limit reached (${this.maxConcurrent}), waiting...`);
+      console.log(`⚠️ [DEBUG] BLOCKED: currentlyProcessing=${this.currentlyProcessing} >= maxConcurrent=${this.maxConcurrent}`);
+      console.log(`⚠️ [DEBUG] Queue has ${this.queue.length} items waiting but processing is blocked!`);
       return;
     }
 
+    console.log(`🔍 [DEBUG] Starting to process item from queue...`);
     this.processing = true;
     const item = this.queue.shift()!;
     this.currentlyProcessing++;

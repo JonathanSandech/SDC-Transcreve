@@ -24,30 +24,42 @@ export class TranscriptionService {
    * Processa uma transcrição de forma assíncrona
    */
   async processTranscription(id: string, filePath: string, modelSize: string): Promise<void> {
+    console.log(`🔍 [DEBUG] processTranscription() START - id=${id}, file=${filePath}, model=${modelSize}`);
     try {
       logger.info(`🎬 Starting transcription for ${id} with model ${modelSize}`);
 
       // Progresso inicial
+      console.log(`🔍 [DEBUG] Sending initial progress...`);
       sendProgress(id, 5, 'Iniciando processamento...');
+      console.log(`🔍 [DEBUG] Updating status to 'processing'...`);
       await this.dbService.updateStatus(id, 'processing');
 
       // 1. Obter duração do arquivo
+      console.log(`🔍 [DEBUG] Getting audio duration...`);
       const duration = await this.getAudioDuration(filePath);
+      console.log(`🔍 [DEBUG] Duration: ${duration}s (${(duration/60).toFixed(1)}min)`);
 
       // Threshold: 40 minutos (2400 segundos)
       const V3_CHUNKING_THRESHOLD = 2400;
+      console.log(`🔍 [DEBUG] Checking duration threshold: ${duration} > ${V3_CHUNKING_THRESHOLD} = ${duration > V3_CHUNKING_THRESHOLD}`);
 
       if (duration > V3_CHUNKING_THRESHOLD) {
+        console.log(`🔍 [DEBUG] Entered CHUNKING branch (long audio)`);
         logger.info(`⚠️ Long audio (${(duration/60).toFixed(1)}min) detected: using V3 multi-process chunking`);
 
         // 2. Extrair áudio se for vídeo
+        console.log(`🔍 [DEBUG] About to extract audio from video...`);
         sendProgress(id, 8, 'Preparando áudio...');
         const extractedAudio = await this.extractAudioFromVideo(filePath);
+        console.log(`🔍 [DEBUG] Audio extraction result: ${extractedAudio || 'no extraction needed (already audio)'}`);
         const audioPath = extractedAudio || filePath;
+        console.log(`🔍 [DEBUG] audioPath set to: ${audioPath}`);
 
         // 3. Dividir áudio em chunks
+        console.log(`🔍 [DEBUG] About to split audio into chunks (720s each)...`);
         sendProgress(id, 10, 'Dividindo áudio em chunks...');
         const chunks = await this.splitAudioIntoChunks(audioPath, 720); // 12 min chunks
+        console.log(`🔍 [DEBUG] Chunks created: ${chunks.length} chunks`);
 
         logger.info(`📊 Processing ${chunks.length} chunks with V3 architecture`);
 
@@ -122,6 +134,7 @@ export class TranscriptionService {
 
       } else {
         // Arquivos curtos: usar método direto (sem chunking)
+        console.log(`🔍 [DEBUG] Entered DIRECT branch (normal duration)`);
         logger.info(`✅ Normal duration (${(duration/60).toFixed(1)}min): using direct transcription`);
 
         sendProgress(id, 10, 'Preparando transcrição...');
@@ -234,7 +247,7 @@ export class TranscriptionService {
     transcriptionId: string,
     timeout: number = 30 * 60 * 1000 // 30 minutos padrão
   ): Promise<PythonTranscriptionResult> {
-    return new Promise(async (resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const pythonScript = path.join(__dirname, '../../python/transcribe.py');
       const pythonPath = process.env.PYTHON_PATH || 'python3';
 
@@ -243,6 +256,11 @@ export class TranscriptionService {
       let outputStream: WriteStream | null = null;
       let outputSize = 0;
       let useFileOutput = false;
+
+      console.log(`🔍 [DEBUG] runPythonScript() - pythonPath: ${pythonPath}`);
+      console.log(`🔍 [DEBUG] runPythonScript() - script: ${pythonScript}`);
+      console.log(`🔍 [DEBUG] runPythonScript() - videoPath: ${videoPath}`);
+      console.log(`🔍 [DEBUG] runPythonScript() - modelSize: ${modelSize}`);
 
       logger.info(`🐍 Executing Python script: ${pythonScript}`);
       logger.info(`🐍 Using Python binary: ${pythonPath}`);
@@ -258,12 +276,14 @@ export class TranscriptionService {
 
       sendProgress(transcriptionId, 15, 'Iniciando script Python...');
 
-      // Configurar processo Python (com -B para não usar .pyc cache)
-      const pythonProcess: ChildProcess = spawn(pythonPath, ['-B', pythonScript, videoPath, modelSize], {
+      // Configurar processo Python (com -B para não usar .pyc cache, -u para unbuffered output)
+      console.log(`🔍 [DEBUG] About to spawn Python process...`);
+      const pythonProcess: ChildProcess = spawn(pythonPath, ['-u', '-B', pythonScript, videoPath, modelSize], {
         env: {
           ...process.env,
           PYTHONIOENCODING: 'utf-8',
           PYTHONUTF8: '1',
+          PYTHONUNBUFFERED: '1',  // Forçar output unbuffered
           // Garantir que FFMPEG_PATH seja passado explicitamente
           FFMPEG_PATH: process.env.FFMPEG_PATH || '',
           FFMPEG_BIN: process.env.FFMPEG_PATH || '',
@@ -272,6 +292,18 @@ export class TranscriptionService {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'] // stdin ignorado, stdout e stderr em pipe
       });
+
+      console.log(`🔍 [DEBUG] Python process spawned, PID: ${pythonProcess.pid}`);
+      console.log(`🔍 [DEBUG] Python stdout connected: ${!!pythonProcess.stdout}`);
+      console.log(`🔍 [DEBUG] Python stderr connected: ${!!pythonProcess.stderr}`);
+
+      // Verificar se arquivo existe ANTES do Python tentar ler
+      try {
+        const fileStats = require('fs').statSync(videoPath);
+        console.log(`🔍 [DEBUG] File exists: YES, size: ${fileStats.size} bytes, mode: ${fileStats.mode.toString(8)}`);
+      } catch (e: any) {
+        console.log(`🔍 [DEBUG] File exists: NO - ${e.message}`);
+      }
 
       // Buffer para outputs pequenos (até MAX_MEMORY_OUTPUT)
       let outputBuffer: Buffer[] = [];
@@ -302,6 +334,7 @@ export class TranscriptionService {
       }, timeout);
 
       pythonProcess.stdout?.on('data', (chunk: Buffer) => {
+        console.log(`🔍 [DEBUG] STDOUT RECEIVED: ${chunk.length} bytes`);
         outputSize += chunk.length;
 
         // Se output ainda é pequeno, manter em memória
@@ -336,6 +369,7 @@ export class TranscriptionService {
 
       pythonProcess.stderr?.on('data', (data: Buffer) => {
         const message = data.toString('utf-8');
+        console.log(`🔍 [DEBUG] STDERR RECEIVED: ${message.substring(0, 200)}`);
 
         // Circular buffer: manter apenas últimos MAX_STDERR_SIZE bytes
         stderrBuffer.push(message);
@@ -374,6 +408,7 @@ export class TranscriptionService {
       });
 
       pythonProcess.on('close', (code: number | null) => {
+        console.log(`🔍 [DEBUG] CLOSE EVENT TRIGGERED - code: ${code}`);
         cleanup().then(() => {
           const errorOutput = stderrBuffer.join('');
           logger.info(`🔚 Python process closed with code: ${code}`);
@@ -459,6 +494,7 @@ export class TranscriptionService {
       });
 
       pythonProcess.on('error', (error: Error) => {
+        console.log(`🔍 [DEBUG] ERROR EVENT TRIGGERED:`, error);
         cleanup().then(() => {
           fs.unlink(tempOutputFile).catch(() => {});
           logger.error('❌ Failed to start Python process:', error);
@@ -544,18 +580,26 @@ export class TranscriptionService {
    * Retorna path do áudio extraído ou null se já é áudio
    */
   private async extractAudioFromVideo(filePath: string): Promise<string | null> {
+    console.log(`🔍 [DEBUG] extractAudioFromVideo() START - file: ${filePath}`);
+
     const ext = path.extname(filePath).toLowerCase();
+    console.log(`🔍 [DEBUG] File extension: ${ext}`);
+
     const audioExts = ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac', '.wma'];
 
     // Já é áudio
     if (audioExts.includes(ext)) {
+      console.log(`🔍 [DEBUG] File is already audio format, skipping extraction`);
       logger.info(`✅ File is already audio: ${filePath}`);
       return null;
     }
 
     // É vídeo, extrair áudio
+    console.log(`🔍 [DEBUG] File is video format, extracting audio...`);
     const audioPath = filePath.replace(/\.[^.]+$/, '.mp3');
     const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    console.log(`🔍 [DEBUG] FFmpeg path: ${ffmpegPath}`);
+    console.log(`🔍 [DEBUG] Target audio path: ${audioPath}`);
 
     logger.info(`🎬 Extracting audio from video: ${filePath} → ${audioPath}`);
 
@@ -592,17 +636,27 @@ export class TranscriptionService {
    * Usa a mesma extensão do arquivo original para evitar transcodificação
    */
   private async splitAudioIntoChunks(audioPath: string, chunkDuration: number = 720): Promise<string[]> {
+    console.log(`🔍 [DEBUG] splitAudioIntoChunks() START - audioPath: ${audioPath}, chunkDuration: ${chunkDuration}s`);
+
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'audio_chunks_'));
+    console.log(`🔍 [DEBUG] Created temp directory: ${tempDir}`);
 
     // Detectar extensão do arquivo original para usar nos chunks
     const audioExt = path.extname(audioPath); // Ex: .m4a, .mp3, .wav
+    console.log(`🔍 [DEBUG] Audio extension: ${audioExt}`);
+
     const chunkPattern = path.join(tempDir, `chunk_%03d${audioExt}`);
+    console.log(`🔍 [DEBUG] Chunk pattern: ${chunkPattern}`);
+
     const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    console.log(`🔍 [DEBUG] FFmpeg path: ${ffmpegPath}`);
 
     logger.info(`📁 Splitting audio into ${chunkDuration}s chunks: ${audioPath}`);
     logger.info(`📄 Using extension: ${audioExt} (same as input to avoid re-encoding)`);
 
     return new Promise((resolve, reject) => {
+      console.log(`🔍 [DEBUG] About to spawn FFmpeg process for splitting...`);
+
       const args = [
         '-i', audioPath,
         '-f', 'segment',
@@ -611,15 +665,20 @@ export class TranscriptionService {
         '-reset_timestamps', '1',
         chunkPattern
       ];
+      console.log(`🔍 [DEBUG] FFmpeg args: ${args.join(' ')}`);
 
       const process = spawn(ffmpegPath, args, { windowsHide: true });
+      console.log(`🔍 [DEBUG] FFmpeg process spawned, PID: ${process.pid}`);
 
       process.stderr?.on('data', (data) => {
         // ffmpeg envia progresso para stderr
-        logger.info(`ffmpeg: ${data.toString().trim()}`);
+        const output = data.toString().trim();
+        console.log(`🔍 [DEBUG] FFmpeg stderr: ${output.substring(0, 200)}`);  // Primeiros 200 chars
+        logger.info(`ffmpeg: ${output}`);
       });
 
       process.on('close', async (code) => {
+        console.log(`🔍 [DEBUG] FFmpeg process closed with code: ${code}`);
         if (code === 0) {
           // Listar chunks criados (com a extensão correta)
           const files = await fs.readdir(tempDir);
@@ -636,6 +695,7 @@ export class TranscriptionService {
       });
 
       process.on('error', (err) => {
+        console.log(`🔍 [DEBUG] FFmpeg process error: ${err.message}`);
         reject(err);
       });
     });

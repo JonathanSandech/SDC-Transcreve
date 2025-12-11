@@ -3,7 +3,7 @@
 """
 Script de transcrição otimizado para arquivos grandes
 Usa streaming e processamento incremental para evitar stack overflow
-Otimizações: int8 para áudios longos, cleanup em etapas, GPU sync
+Otimizações: Whisper oficial (OpenAI) com suporte AMD ROCm
 """
 
 import sys
@@ -16,7 +16,7 @@ import tempfile
 import subprocess
 from pathlib import Path
 from moviepy import VideoFileClip, AudioFileClip
-from faster_whisper import WhisperModel
+import whisper
 import torch
 
 # Forçar UTF-8 no stdout e stderr ANTES de qualquer print
@@ -214,241 +214,115 @@ def split_audio_into_chunks(audio_path, chunk_duration=720):
     print(f"✅ Created {len(chunk_files)} chunks", file=sys.stderr)
     return chunk_files, temp_dir
 
-def get_model_config(duration):
-    """Configuração otimizada baseada na duração"""
-    config = {
-        'beam_size': 5,
-        'batch_size': 16,
-        'num_workers': 2,
+def get_whisper_options(duration):
+    """Opções de transcrição baseadas na duração do áudio"""
+    options = {
+        'language': 'pt',
+        'verbose': False,
         'condition_on_previous_text': True,
-        'max_segments_per_batch': 100
+        'temperature': 0.0,
     }
-    
+
     if duration >= 3600:  # > 1 hora
-        config.update({
-            'beam_size': 1,
-            'batch_size': 4,
-            'num_workers': 1,
+        options.update({
             'condition_on_previous_text': False,
-            'max_segments_per_batch': 50
+            'beam_size': 1,
         })
         print(f"⚠️ Very long video ({duration/3600:.1f}h): using minimal config", file=sys.stderr)
     elif duration >= 1800:  # 30-60 minutos
-        config.update({
-            'beam_size': 1,
-            'batch_size': 8,
-            'num_workers': 1,
+        options.update({
             'condition_on_previous_text': False,
-            'max_segments_per_batch': 75
+            'beam_size': 3,
         })
         print(f"⚠️ Long video ({duration/60:.1f}min): using conservative config", file=sys.stderr)
     elif duration >= 600:  # 10-30 minutos
-        config.update({
-            'beam_size': 3,
-            'batch_size': 12,
-            'num_workers': 2,
-            'max_segments_per_batch': 100
+        options.update({
+            'beam_size': 5,
         })
         print(f"📊 Medium video ({duration/60:.1f}min): using balanced config", file=sys.stderr)
     else:
         print(f"✅ Short video ({duration/60:.1f}min): using quality config", file=sys.stderr)
-    
-    return config
+
+    return options
 
 def transcribe_audio_streaming(audio_path, model_size='medium'):
     """
-    Transcreve áudio com streaming para arquivo temporário
-    Evita acumular toda a transcrição em memória
+    Transcreve áudio usando Whisper oficial (OpenAI)
+    Suporta GPU AMD via ROCm
     """
-    temp_file = None
-    temp_filename = None
-    
     try:
         send_progress(5, "Iniciando transcrição...")
-        
-        # Detectar GPU
+
+        # Detectar GPU (ROCm aparece como CUDA no PyTorch)
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         print(f"Using device: {device}", file=sys.stderr)
         if device == "cuda":
             print(f"GPU: {torch.cuda.get_device_name(0)}", file=sys.stderr)
-            free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
-            print(f"GPU Free Memory: {free_memory / 1024**3:.2f} GB", file=sys.stderr)
+            try:
+                free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+                print(f"GPU Free Memory: {free_memory / 1024**3:.2f} GB", file=sys.stderr)
+            except:
+                print("GPU info not available", file=sys.stderr)
 
-        # Obter duração e configuração
+        # Obter duração e opções
         duration = get_duration(audio_path)
-        config = get_model_config(duration)
+        options = get_whisper_options(duration)
 
-        # Forçar int8 para áudios longos (reduz pressão de memória e evita crashes no cleanup)
-        # Threshold: 40 minutos (2400 segundos)
-        if duration > 2400:
-            compute_type = "int8"
-            print(f"⚠️ Long audio ({duration/60:.1f}min) detected: forcing int8 compute type to reduce memory pressure", file=sys.stderr)
-        else:
-            compute_type = "float16" if device == "cuda" else "int8"
-            print(f"✅ Using compute_type: {compute_type}", file=sys.stderr)
-        
         send_progress(10, "Carregando modelo de IA...")
-        
-        # Carregar modelo com configuração otimizada
-        model = WhisperModel(
-            model_size,
-            device=device,
-            compute_type=compute_type,
-            num_workers=config['num_workers']
-        )
-        
-        send_progress(20, "Modelo carregado, iniciando transcrição...")
-        
-        # Criar arquivo temporário para armazenar resultado
-        temp_file = tempfile.NamedTemporaryFile(
-            mode='w',
-            encoding='utf-8',
-            delete=False,
-            suffix='.txt'
-        )
-        temp_filename = temp_file.name
-        print(f"📝 Writing to temp file: {temp_filename}", file=sys.stderr)
-        
-        # Transcrever com configurações otimizadas
-        segments_generator, info = model.transcribe(
-            audio_path,
-            language="pt",
-            vad_filter=True,
-            word_timestamps=False,
-            beam_size=config['beam_size'],
-            condition_on_previous_text=config['condition_on_previous_text'],
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.6
-        )
-        
-        print(f"Detected language: {info.language} (probability: {info.language_probability:.2f})", file=sys.stderr)
-        
-        total_duration = info.duration if hasattr(info, 'duration') else duration
-        print(f"Audio duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)", file=sys.stderr)
-        
-        send_progress(30, "Processando transcrição...")
-        
-        # Processar segmentos em batches e escrever diretamente no arquivo
-        segment_count = 0
-        batch_texts = []
-        last_progress = 30
-        chars_written = 0
-        max_segments_per_batch = config['max_segments_per_batch']
-        
-        for segment in segments_generator:
-            # Adicionar texto ao batch
-            batch_texts.append(segment.text.strip())
-            segment_count += 1
-            
-            # Escrever batch ao arquivo quando atingir limite
-            if len(batch_texts) >= max_segments_per_batch:
-                batch_text = ' '.join(batch_texts)
-                temp_file.write(batch_text + ' ')
-                temp_file.flush()  # Forçar escrita no disco
-                chars_written += len(batch_text)
-                
-                # Limpar batch da memória
-                batch_texts.clear()
-                
-                # Limpar cache periodicamente
-                if segment_count % 200 == 0:
-                    gc.collect()
-                    if device == "cuda":
-                        torch.cuda.empty_cache()
-                    print(f"Processed {segment_count} segments, {chars_written} chars written...", file=sys.stderr)
-            
-            # Atualizar progresso
-            if total_duration and total_duration > 0:
-                current_progress = min(90, int(30 + (segment.end / total_duration) * 55))
-                if current_progress >= last_progress + 5:
-                    send_progress(current_progress, "Transcrevendo...")
-                    last_progress = current_progress
-        
-        # Escrever segmentos restantes
-        if batch_texts:
-            batch_text = ' '.join(batch_texts)
-            temp_file.write(batch_text)
-            chars_written += len(batch_text)
-        
-        temp_file.close()
-        
-        print(f"Total segments: {segment_count}", file=sys.stderr)
-        print(f"Total characters written: {chars_written}", file=sys.stderr)
 
+        # Carregar modelo Whisper oficial
+        print(f"Loading Whisper model: {model_size}", file=sys.stderr)
+        model = whisper.load_model(model_size, device=device)
+
+        send_progress(20, "Modelo carregado, iniciando transcrição...")
+
+        # Usar FP16 se GPU disponível
+        fp16 = device == "cuda"
+
+        # Transcrever
+        print(f"Starting transcription with fp16={fp16}...", file=sys.stderr)
+        send_progress(30, "Processando transcrição...")
+
+        result = model.transcribe(
+            audio_path,
+            language=options['language'],
+            verbose=options['verbose'],
+            condition_on_previous_text=options['condition_on_previous_text'],
+            temperature=options['temperature'],
+            beam_size=options.get('beam_size', 5),
+            fp16=fp16
+        )
+
+        text = result["text"].strip()
+
+        print(f"📊 Transcription completed: {len(text)} characters", file=sys.stderr)
         send_progress(92, "Finalizando transcrição...")
 
-        # Limpar modelo da memória (estratégia em etapas para evitar crash)
-        # Limpar GPU ANTES de deletar objetos (reduz pressão de memória)
-        if device == "cuda":
-            try:
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()  # Esperar operações GPU finalizarem
-            except Exception as e:
-                print(f"⚠️ Erro ao limpar cache GPU (pre-cleanup): {e}", file=sys.stderr)
-
-        # Deletar segments_generator
-        try:
-            del segments_generator
-        except Exception as e:
-            print(f"⚠️ Erro ao deletar segments_generator: {e}", file=sys.stderr)
-
-        # Garbage collect intermediário
-        gc.collect()
-
-        # Deletar modelo (operação crítica)
-        try:
-            # Tentar descarregar modelo interno de forma mais suave
-            if hasattr(model, 'model'):
-                del model.model
-            del model
-        except Exception as e:
-            print(f"⚠️ AVISO: Erro ao deletar model: {e}", file=sys.stderr)
-            print(f"⚠️ Continuando (modelo pode ter sido parcialmente liberado)", file=sys.stderr)
-
-        # Garbage collect final
-        gc.collect()
-
-        # Limpar GPU pós-cleanup
+        # Limpar modelo da memória
         if device == "cuda":
             try:
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
             except Exception as e:
-                print(f"⚠️ Erro ao limpar cache GPU (post-cleanup): {e}", file=sys.stderr)
-        
-        send_progress(95, "Lendo resultado...")
-        
-        # Ler o arquivo completo (mais eficiente que acumular em memória)
-        with open(temp_filename, 'r', encoding='utf-8') as f:
-            text = f.read()
-        
-        print(f"📊 Final text length: {len(text)} characters", file=sys.stderr)
-        
-        # Deletar arquivo temporário
-        try:
-            os.unlink(temp_filename)
-        except:
-            pass
-        
-        return text
-    
-    except Exception as e:
-        # Limpar arquivo temporário em caso de erro
-        if temp_filename and os.path.exists(temp_filename):
+                print(f"⚠️ Erro ao limpar cache GPU: {e}", file=sys.stderr)
+
+        del model
+        gc.collect()
+
+        if device == "cuda":
             try:
-                os.unlink(temp_filename)
-            except:
-                pass
-        
+                torch.cuda.empty_cache()
+            except Exception as e:
+                print(f"⚠️ Erro ao limpar cache GPU (post-cleanup): {e}", file=sys.stderr)
+
+        send_progress(95, "Transcrição concluída!")
+
+        return text
+
+    except Exception as e:
         print(f"❌ Transcription error: {str(e)}", file=sys.stderr)
         raise Exception(f"Error transcribing audio: {str(e)}")
-    
-    finally:
-        # Garantir que arquivo temporário seja fechado
-        if temp_file and not temp_file.closed:
-            temp_file.close()
 
 def check_gpu_memory(min_free_gb=2.0):
     """
@@ -495,6 +369,7 @@ def transcribe_simple(audio_path, model_size='medium'):
     """
     Transcrição simples de um único arquivo sem chunking interno.
     Usado pela arquitetura V3 onde cada processo Python processa apenas um chunk.
+    Usa Whisper oficial (OpenAI) com suporte AMD ROCm.
 
     Args:
         audio_path: Caminho do arquivo de áudio (já é um chunk)
@@ -506,19 +381,13 @@ def transcribe_simple(audio_path, model_size='medium'):
     try:
         send_progress(10, "Iniciando transcrição (modo simples)...")
 
-        # Detectar GPU
+        # Detectar GPU (ROCm aparece como CUDA no PyTorch)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"🖥️  Using device: {device}", file=sys.stderr)
 
         # Obter duração
         duration = get_duration(audio_path)
         print(f"📊 Audio duration: {duration:.2f}s ({duration/60:.2f}min)", file=sys.stderr)
-
-        # Para chunks individuais (max 12 min), usar float16 para estabilidade
-        # float16 previne NaN propagation e precision loss que causam crashes
-        # Custo: +2GB VRAM | Benefício: 95% menos crashes (exit code 3221226505)
-        compute_type = "float16"
-        print(f"✅ Using compute_type: {compute_type} (chunk mode - stable, prevents NaN)", file=sys.stderr)
 
         send_progress(20, "Carregando modelo...")
 
@@ -529,52 +398,33 @@ def transcribe_simple(audio_path, model_size='medium'):
             if not check_gpu_memory(2.0):
                 raise Exception("Insufficient GPU memory. Please wait for previous processes to finish.")
 
-        # Carregar modelo uma única vez
-        model = WhisperModel(
-            model_size,
-            device=device,
-            compute_type=compute_type,
-            num_workers=2
-        )
+        # Carregar modelo Whisper oficial
+        print(f"Loading Whisper model: {model_size}", file=sys.stderr)
+        model = whisper.load_model(model_size, device=device)
 
         send_progress(30, "Transcrevendo...")
 
-        # Transcrever
-        segments_generator, info = model.transcribe(
+        # Usar FP16 se GPU disponível
+        fp16 = device == "cuda"
+
+        # Transcrever com Whisper oficial
+        result = model.transcribe(
             audio_path,
             language="pt",
-            vad_filter=True,
-            word_timestamps=False,
+            fp16=fp16,
             beam_size=5,
             condition_on_previous_text=True,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.6
+            temperature=0.0,
+            verbose=False
         )
 
-        print(f"📝 Detected language: {info.language} (probability: {info.language_probability:.2f})", file=sys.stderr)
+        text = result["text"].strip()
 
-        # Coletar texto
-        texts = []
-        segment_count = 0
-
-        for segment in segments_generator:
-            texts.append(segment.text.strip())
-            segment_count += 1
-
-            # Atualizar progresso
-            if segment_count % 10 == 0:
-                current_progress = min(90, int(30 + (segment_count / 100) * 60))
-                send_progress(current_progress, "Transcrevendo...")
-
-        text = ' '.join(texts)
-
-        print(f"✅ Transcribed {segment_count} segments, {len(text)} characters", file=sys.stderr)
+        print(f"✅ Transcribed {len(text)} characters", file=sys.stderr)
 
         send_progress(95, "Finalizando...")
 
-        # Cleanup (será automático ao processo terminar, mas fazemos mesmo assim)
-        del segments_generator
+        # Cleanup
         del model
         gc.collect()
         if device == "cuda":
@@ -589,6 +439,7 @@ def transcribe_simple(audio_path, model_size='medium'):
 def transcribe_with_chunking(audio_path, model_size, duration):
     """
     Transcreve áudio dividindo em chunks para evitar crash em arquivos muito longos
+    Usa Whisper oficial (OpenAI) com suporte AMD ROCm
 
     Args:
         audio_path: caminho do arquivo de áudio
@@ -615,16 +466,6 @@ def transcribe_with_chunking(audio_path, model_size, duration):
         # Detectar GPU
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Forçar int8 para áudios longos
-        if duration > 2400:  # >40 min
-            compute_type = "int8"
-            print(f"⚠️ Long audio ({duration/60:.1f}min): using int8 compute type", file=sys.stderr)
-        else:
-            compute_type = "float16" if device == "cuda" else "int8"
-
-        # Configuração otimizada para chunks
-        config = get_model_config(chunk_duration)  # Config baseado no tamanho do chunk, não do áudio total
-
         # Processar cada chunk
         partial_results = []
 
@@ -639,34 +480,25 @@ def transcribe_with_chunking(audio_path, model_size, duration):
             print(f"🎤 Processing chunk {chunk_num}/{total_chunks}: {chunk_path}", file=sys.stderr)
 
             # Carregar modelo NOVO para cada chunk
-            model = WhisperModel(
-                model_size,
-                device=device,
-                compute_type=compute_type,
-                num_workers=config['num_workers']
-            )
+            model = whisper.load_model(model_size, device=device)
 
             send_progress(chunk_base_progress + 2, f"Chunk {chunk_num}/{total_chunks}: transcrevendo...")
 
-            # Transcrever chunk
-            segments_generator, info = model.transcribe(
+            # Usar FP16 se GPU disponível
+            fp16 = device == "cuda"
+
+            # Transcrever chunk com Whisper oficial
+            result = model.transcribe(
                 chunk_path,
                 language="pt",
-                vad_filter=True,
-                word_timestamps=False,
-                beam_size=config['beam_size'],
-                condition_on_previous_text=config['condition_on_previous_text'],
-                compression_ratio_threshold=2.4,
-                log_prob_threshold=-1.0,
-                no_speech_threshold=0.6
+                fp16=fp16,
+                beam_size=5,
+                condition_on_previous_text=False,  # False para chunks independentes
+                temperature=0.0,
+                verbose=False
             )
 
-            # Coletar texto do chunk
-            chunk_texts = []
-            for segment in segments_generator:
-                chunk_texts.append(segment.text.strip())
-
-            chunk_text = ' '.join(chunk_texts)
+            chunk_text = result["text"].strip()
             partial_results.append(chunk_text)
 
             print(f"✅ Chunk {chunk_num}/{total_chunks} completed: {len(chunk_text)} chars", file=sys.stderr)
@@ -675,13 +507,6 @@ def transcribe_with_chunking(audio_path, model_size, duration):
 
             # CRÍTICO: Limpar modelo completamente antes do próximo chunk
             try:
-                del segments_generator
-            except:
-                pass
-
-            try:
-                if hasattr(model, 'model'):
-                    del model.model
                 del model
             except Exception as e:
                 print(f"⚠️ Erro ao deletar model do chunk {chunk_num}: {e}", file=sys.stderr)

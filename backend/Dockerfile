@@ -1,5 +1,5 @@
 # ============================================
-# Multi-stage build para Backend com GPU
+# Multi-stage build para Backend com Whisper oficial (AMD / ROCm)
 # ============================================
 
 # Estágio 1: Build do TypeScript
@@ -10,7 +10,7 @@ WORKDIR /app
 # Copiar package files
 COPY package*.json ./
 
-# Instalar dependências de build
+# Instalar dependências de build (inclui devDependencies pro tsc)
 RUN npm ci && npm cache clean --force
 
 # Copiar código fonte
@@ -20,75 +20,85 @@ COPY . .
 RUN npm run build
 
 # ============================================
-# Estágio 2: Runtime com CUDA + cuDNN
+# Estágio 2: Runtime com PyTorch + ROCm (AMD GPU)
 # ============================================
-FROM nvidia/cuda:12.0.0-cudnn8-runtime-ubuntu22.04
+# Imagem base com PyTorch compilado para ROCm (AMD)
+# Ideal: fixar uma tag específica compatível com a versão de ROCm do host.
+FROM rocm/pytorch:latest
 
 # Metadados
 LABEL maintainer="jonathan.barbosa"
-LABEL description="SDC Transcription Backend with GPU support"
+LABEL description="SDC Transcription Backend with Whisper (AMD ROCm GPU)"
 
 # Evitar prompts interativos
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Instalar dependências do sistema
+# Atualizar e instalar dependências do sistema
 RUN apt-get update && apt-get install -y \
     curl \
+    ca-certificates \
     gnupg \
     build-essential \
     python3 \
     python3-pip \
-    python3-venv \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar Node.js 20
+# Instalar Node.js 20 (runtime)
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get update && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Criar usuário não-root
-RUN useradd -m -u 1000 appuser
+# Criar usuário não-root (verificar se UID 1000 já existe)
+RUN if id 1000 >/dev/null 2>&1; then \
+        echo "UID 1000 already exists, using existing user"; \
+        EXISTING_USER=$(id -un 1000); \
+        EXISTING_GROUP=$(id -gn 1000); \
+        echo "Existing user: $EXISTING_USER (group: $EXISTING_GROUP)"; \
+        if [ "$EXISTING_USER" != "appuser" ]; then \
+            usermod -l appuser $EXISTING_USER 2>/dev/null || true; \
+            groupmod -n appuser $EXISTING_GROUP 2>/dev/null || true; \
+        fi; \
+    else \
+        useradd -m -u 1000 appuser; \
+    fi
 
-# Configurar diretório de trabalho
+# Diretório de trabalho
 WORKDIR /app
 
-# ======= CRIAR DIRETÓRIOS COMO ROOT =======
-RUN mkdir -p /app/uploads /app/logs
+# Criar diretórios necessários e ajustar permissões
+RUN mkdir -p /app/uploads /app/logs \
+    && chown -R 1000:1000 /app
 
-# Copiar arquivos de dependências Node.js do builder
-COPY --from=builder --chown=appuser:appuser /app/node_modules ./node_modules
+# Copiar scripts Python da aplicação (como root para instalar dependências)
+COPY python ./python
 
-# Copiar código compilado do builder
-COPY --from=builder --chown=appuser:appuser /app/dist ./dist
+# Instalar dependências Python ANTES de trocar de usuário (ainda como root)
+RUN pip install --upgrade pip \
+    && pip install -r python/requirements.txt
 
-# Copiar scripts Python e requirements
-COPY --chown=appuser:appuser python ./python
+# Copiar dependências Node.js e código compilado do builder
+COPY --from=builder --chown=1000:1000 /app/node_modules ./node_modules
+COPY --from=builder --chown=1000:1000 /app/dist ./dist
 
-# Criar e configurar ambiente virtual Python
-RUN python3 -m venv /app/venv \
-    && chown -R appuser:appuser /app/venv /app/uploads /app/logs
+# Ajustar permissões do diretório python depois de copiar
+RUN chown -R 1000:1000 /app/python
 
-# ======= TROCAR PARA USUÁRIO NÃO-ROOT =======
-USER appuser
-
-# Instalar dependências Python dentro do VENV
-RUN /app/venv/bin/pip install --upgrade pip \
-    && /app/venv/bin/pip install -r python/requirements.txt
+# Trocar para usuário não-root (usar UID numérico para garantir compatibilidade)
+USER 1000
 
 # Variáveis de ambiente
 ENV NODE_ENV=production \
     PORT=8000 \
-    PYTHON_PATH=/app/venv/bin/python3 \
-    PATH="/app/venv/bin:$PATH"
+    PYTHON_PATH=python3 \
+    PATH="$PATH:/home/appuser/.local/bin"
 
-# Expor porta
+# Expor porta do backend
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Comando de inicialização
+# Comando de inicialização do backend Node
 CMD ["node", "dist/server.js"]
-
