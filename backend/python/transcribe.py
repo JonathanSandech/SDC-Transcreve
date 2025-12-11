@@ -211,17 +211,9 @@ def transcribe_audio_streaming(audio_path, model_size='medium'):
     try:
         send_progress(5, "Iniciando transcrição...")
 
-        # Detectar GPU (ROCm aparece como 'cuda' no PyTorch)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"🖥️ Using device: {device}", file=sys.stderr)
-
-        if device == "cuda":
-            print(f"GPU: {torch.cuda.get_device_name(0)}", file=sys.stderr)
-            try:
-                free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
-                print(f"GPU Free Memory: {free_memory / 1024**3:.2f} GB", file=sys.stderr)
-            except:
-                print("GPU info not available", file=sys.stderr)
+        # WORKAROUND: Forçar CPU para evitar crash no driver AMD
+        device = "cpu"
+        print(f"🖥️ WORKAROUND: Forcing CPU to avoid AMD driver crash. Using device: {device}", file=sys.stderr)
 
         # Obter duração e opções
         duration = get_duration(audio_path)
@@ -326,22 +318,15 @@ def transcribe_simple(audio_path, model_size='medium'):
     try:
         send_progress(10, "Iniciando transcrição (modo simples)...")
 
-        # Detectar GPU (ROCm aparece como CUDA no PyTorch)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"🖥️  Using device: {device}", file=sys.stderr)
+        # WORKAROUND: Forçar CPU para evitar crash no driver AMD
+        device = "cpu"
+        print(f"🖥️ WORKAROUND: Forcing CPU to avoid AMD driver crash. Using device: {device}", file=sys.stderr)
 
         # Obter duração
         duration = get_duration(audio_path)
         print(f"📊 Audio duration: {duration:.2f}s ({duration/60:.2f}min)", file=sys.stderr)
 
         send_progress(20, "Carregando modelo...")
-
-        # Verificar se há memória GPU suficiente antes de carregar modelo
-        if device == "cuda" and not check_gpu_memory(2.0):
-            print(f"⚠️ Insufficient GPU memory. Waiting 5s and retrying...", file=sys.stderr)
-            time.sleep(5)
-            if not check_gpu_memory(2.0):
-                raise Exception("Insufficient GPU memory. Please wait for previous processes to finish.")
 
         # Carregar modelo Whisper oficial
         print(f"Loading Whisper model: {model_size}", file=sys.stderr)
@@ -408,8 +393,9 @@ def transcribe_with_chunking(audio_path, model_size, duration):
         print(f"📊 Processing {total_chunks} chunks of {chunk_duration}s each", file=sys.stderr)
         send_progress(10, f"Processando {total_chunks} chunks...")
 
-        # Detectar GPU
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # WORKAROUND: Forçar CPU para evitar crash no driver AMD
+        device = "cpu"
+        print(f"🖥️ WORKAROUND: Forcing CPU to avoid AMD driver crash. Using device: {device}", file=sys.stderr)
 
         # Processar cada chunk
         partial_results = []
