@@ -67,6 +67,8 @@ services:
         condition: service_healthy
 
     # >>> GPU AMD (ROCm) <<<
+    # Aumentar a memória compartilhada para modelos de IA (padrão é 64MB)
+    shm_size: '8g'
     devices:
       - "/dev/kfd:/dev/kfd"
       - "/dev/dri:/dev/dri"
