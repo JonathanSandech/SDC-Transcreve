@@ -1,12 +1,12 @@
 # Dependências para transcrição de áudio/vídeo
-# Usando Whisper oficial (OpenAI) com PyTorch/ROCm
+# Usando faster-whisper com PyTorch/ROCm
 # Script: transcribe.py
 
 # Processamento de vídeo/áudio
 moviepy>=1.0.3
 
-# Whisper oficial (OpenAI) - compatível com AMD ROCm
-openai-whisper>=20231117
+# faster-whisper - otimizado e compatível com AMD ROCm
+faster-whisper>=1.0.0
 
 # Dependências auxiliares
 numpy>=1.24.0

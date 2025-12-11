@@ -3,7 +3,7 @@
 """
 Script de transcrição otimizado para arquivos grandes
 Usa streaming e processamento incremental para evitar stack overflow
-Otimizações: Whisper oficial (OpenAI) com suporte AMD ROCm
+Otimizações: faster-whisper com suporte AMD ROCm
 """
 
 import sys
@@ -16,7 +16,7 @@ import tempfile
 import subprocess
 from pathlib import Path
 from moviepy import VideoFileClip, AudioFileClip
-import whisper
+from faster_whisper import WhisperModel
 import torch
 
 # Forçar UTF-8 no stdout e stderr ANTES de qualquer print
@@ -247,14 +247,16 @@ def get_whisper_options(duration):
 
 def transcribe_audio_streaming(audio_path, model_size='medium'):
     """
-    Transcreve áudio usando Whisper oficial (OpenAI)
+    Transcreve áudio usando faster-whisper
     Suporta GPU AMD via ROCm
     """
     try:
         send_progress(5, "Iniciando transcrição...")
 
-        # Detectar GPU (ROCm aparece como CUDA no PyTorch)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # FORÇAR CPU: faster-whisper/ctranslate2 não é compatível com ROCm
+        # Ainda assim é MUITO mais rápido que openai-whisper em CPU
+        device = "cpu"
+        print("⚠️ Using CPU mode (faster-whisper is not ROCm-compatible, but still faster than alternatives)", file=sys.stderr)
 
         print(f"Using device: {device}", file=sys.stderr)
         if device == "cuda":
@@ -271,32 +273,55 @@ def transcribe_audio_streaming(audio_path, model_size='medium'):
 
         send_progress(10, "Carregando modelo de IA...")
 
-        # Carregar modelo Whisper oficial
-        print(f"Loading Whisper model: {model_size}", file=sys.stderr)
-        model = whisper.load_model(model_size, device=device)
+        # Escolher compute_type baseado no device
+        # float16 para GPU, int8 para CPU (melhor performance)
+        compute_type = "float16" if device == "cuda" else "int8"
+
+        # Carregar modelo faster-whisper
+        print(f"Loading faster-whisper model: {model_size} (compute_type={compute_type})", file=sys.stderr)
+
+        # DEBUG: Environment antes de carregar modelo
+        print(f"🔍 [DEBUG] About to load WhisperModel...", file=sys.stderr)
+        print(f"🔍 [DEBUG] model_size={model_size}, device={device}, compute_type={compute_type}", file=sys.stderr)
+        print(f"🔍 [DEBUG] HOME={os.getenv('HOME')}", file=sys.stderr)
+        print(f"🔍 [DEBUG] HF_HOME={os.getenv('HF_HOME')}", file=sys.stderr)
+        print(f"🔍 [DEBUG] TORCH_HOME={os.getenv('TORCH_HOME')}", file=sys.stderr)
+        print(f"🔍 [DEBUG] PWD={os.getcwd()}", file=sys.stderr)
+        sys.stderr.flush()
+
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
+
+        print(f"🔍 [DEBUG] WhisperModel loaded successfully!", file=sys.stderr)
+        sys.stderr.flush()
 
         send_progress(20, "Modelo carregado, iniciando transcrição...")
 
-        # Usar FP16 se GPU disponível
-        fp16 = device == "cuda"
-
         # Transcrever
-        print(f"Starting transcription with fp16={fp16}...", file=sys.stderr)
+        print(f"Starting transcription...", file=sys.stderr)
         send_progress(30, "Processando transcrição...")
 
-        result = model.transcribe(
+        segments, info = model.transcribe(
             audio_path,
             language=options['language'],
-            verbose=options['verbose'],
-            condition_on_previous_text=options['condition_on_previous_text'],
-            temperature=options['temperature'],
             beam_size=options.get('beam_size', 5),
-            fp16=fp16
+            condition_on_previous_text=options['condition_on_previous_text'],
+            temperature=options['temperature']
         )
 
-        text = result["text"].strip()
+        # Concatenar todos os segmentos
+        print(f"📊 Detected language: {info.language} (probability: {info.language_probability:.2f})", file=sys.stderr)
 
-        print(f"📊 Transcription completed: {len(text)} characters", file=sys.stderr)
+        text_parts = []
+        segment_count = 0
+        for segment in segments:
+            text_parts.append(segment.text)
+            segment_count += 1
+            if segment_count % 10 == 0:
+                print(f"📝 Processed {segment_count} segments...", file=sys.stderr)
+
+        text = " ".join(text_parts).strip()
+
+        print(f"📊 Transcription completed: {len(text)} characters from {segment_count} segments", file=sys.stderr)
         send_progress(92, "Finalizando transcrição...")
 
         # Limpar modelo da memória

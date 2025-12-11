@@ -843,8 +843,15 @@ export class TranscriptionService {
    * Helper: Calcular timeout baseado na duração
    */
   private calculateTimeoutFromDuration(durationSeconds: number): number {
-    // Fórmula: duration * 60 segundos + buffer de 5 minutos
-    const timeout = (durationSeconds * 60) + (5 * 60 * 1000);
-    return Math.min(timeout, 2 * 60 * 60 * 1000); // Max 2 horas
+    // CPU mode: Whisper em CPU é 10-20x mais lento que GPU
+    // Fórmula: duration * 20 (realtime factor) + buffer de 10 minutos
+    const realtimeFactor = 20; // CPU pode levar até 20x o tempo do áudio
+    const bufferMinutes = 10;
+    const timeout = (durationSeconds * realtimeFactor * 1000) + (bufferMinutes * 60 * 1000);
+    const maxTimeout = 4 * 60 * 60 * 1000; // Max 4 horas
+
+    const finalTimeout = Math.min(timeout, maxTimeout);
+    console.log(`⏱️ Timeout calculated: ${finalTimeout / 1000 / 60} minutes for ${durationSeconds}s video`);
+    return finalTimeout;
   }
 }
