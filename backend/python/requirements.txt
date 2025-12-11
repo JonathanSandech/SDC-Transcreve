@@ -1,15 +1,17 @@
 # Dependências para transcrição de áudio/vídeo
-# Usando faster-whisper com PyTorch/ROCm
+# Usando openai-whisper com PyTorch/CUDA
 # Script: transcribe.py
 
-# Processamento de vídeo/áudio
+# Processamento de vídeo/ádio
 moviepy>=1.0.3
 
-# faster-whisper - otimizado e compatível com AMD ROCm
-faster-whisper>=1.0.0
+# OpenAI Whisper - compatível com NVIDIA CUDA
+openai-whisper>=20231117
+
+# PyTorch (necessário para Whisper)
+# A versão do CUDA deve ser compatível com a imagem base
+torch>=2.2.2
+torchaudio>=2.2.2
 
 # Dependências auxiliares
 numpy>=1.24.0
-
-# Nota: PyTorch com ROCm virá da imagem base rocm/pytorch
-# Não incluir torch ou torchaudio aqui

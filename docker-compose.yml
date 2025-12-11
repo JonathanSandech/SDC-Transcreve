@@ -66,15 +66,14 @@ services:
       database:
         condition: service_healthy
 
-    # >>> GPU AMD (ROCm) <<<
-    devices:
-      - "/dev/kfd:/dev/kfd"
-      - "/dev/dri:/dev/dri"
-    group_add:
-      - video
-      - "993"  # GID do grupo render do host (acesso aos dispositivos GPU)
-    security_opt:
-      - seccomp=unconfined
+    # >>> GPU NVIDIA (CUDA) <<<
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]

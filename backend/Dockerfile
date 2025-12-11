@@ -1,5 +1,5 @@
 # ============================================
-# Multi-stage build para Backend com Whisper oficial (AMD / ROCm)
+# Multi-stage build para Backend com Whisper (NVIDIA / CUDA)
 # ============================================
 
 # Estágio 1: Build do TypeScript
@@ -20,15 +20,15 @@ COPY . .
 RUN npm run build
 
 # ============================================
-# Estágio 2: Runtime com PyTorch + ROCm (AMD GPU)
+# Estágio 2: Runtime com PyTorch + CUDA (NVIDIA GPU)
 # ============================================
-# Imagem base com PyTorch compilado para ROCm (AMD)
-# Ideal: fixar uma tag específica compatível com a versão de ROCm do host.
-FROM rocm/pytorch:latest
+# Imagem base com PyTorch compilado para CUDA (NVIDIA)
+# Tag: 2.2.2-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
 
 # Metadados
 LABEL maintainer="jonathan.barbosa"
-LABEL description="SDC Transcription Backend with Whisper (AMD ROCm GPU)"
+LABEL description="SDC Transcription Backend with Whisper (NVIDIA CUDA GPU)"
 
 # Evitar prompts interativos
 ENV DEBIAN_FRONTEND=noninteractive
