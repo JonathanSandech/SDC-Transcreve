@@ -37,7 +37,7 @@ check_env() {
 # Build
 build() {
     print_info "Building Docker images..."
-    docker-compose build
+    docker compose build
     if [ $? -eq 0 ]; then
         print_success "Build completed successfully"
     else
@@ -50,7 +50,7 @@ build() {
 start() {
     check_env
     print_info "Starting all services..."
-    docker-compose up -d
+    docker compose up -d
     if [ $? -eq 0 ]; then
         print_success "Services started"
         print_info "Frontend: http://localhost"
@@ -65,61 +65,62 @@ start() {
 # Stop
 stop() {
     print_info "Stopping all services..."
-    docker-compose down
+    docker compose down
     print_success "Services stopped"
 }
 
 # Restart
 restart() {
     print_info "Restarting all services..."
-    docker-compose restart
+    docker compose restart
     print_success "Services restarted"
 }
 
 # Logs
 logs() {
     if [ -z "$1" ]; then
-        docker-compose logs -f
+        docker compose logs -f
     else
-        docker-compose logs -f $1
+        docker compose logs -f $1
     fi
 }
 
 # Status
 status() {
-    docker-compose ps
+    docker compose ps
 }
 
-# GPU Test
+# GPU Test (AMD ROCm)
 test_gpu() {
-    print_info "Testing GPU in backend container..."
-    docker-compose exec backend nvidia-smi
+    print_info "Testing AMD GPU in backend container..."
+    docker compose exec backend rocm-smi
     echo ""
-    docker-compose exec backend /app/venv/bin/python3 -c "import torch; print('PyTorch CUDA available:', torch.cuda.is_available())"
+    print_info "Testing PyTorch with ROCm..."
+    docker compose exec backend python3 -c "import torch; print(f'PyTorch ROCm available (via CUDA interface): {torch.cuda.is_available()}'); print(f'Device count: {torch.cuda.device_count()}'); print(f'Device name: {torch.cuda.get_device_name(0)}')"
 }
 
 # Clean
 clean() {
     print_info "Cleaning up..."
-    docker-compose down -v --rmi all
+    docker compose down -v --rmi all
     print_success "Cleanup complete"
 }
 
 # Rebuild
 rebuild() {
     print_info "Rebuilding from scratch..."
-    docker-compose down
-    docker-compose build --no-cache
-    docker-compose up -d
+    docker compose down
+    docker compose build --no-cache
+    docker compose up -d
     print_success "Rebuild complete"
 }
 
 # Shell
 shell() {
     if [ -z "$1" ]; then
-        docker-compose exec backend bash
+        docker compose exec backend bash
     else
-        docker-compose exec $1 bash
+        docker compose exec $1 bash
     fi
 }
 
@@ -127,7 +128,7 @@ shell() {
 backup() {
     BACKUP_FILE="backup_$(date +%Y%m%d_%H%M%S).sql"
     print_info "Creating database backup: $BACKUP_FILE"
-    docker-compose exec -T database pg_dump -U transcription_user transcription_db > $BACKUP_FILE
+    docker compose exec -T database pg_dump -U transcription_user transcription_db > $BACKUP_FILE
     print_success "Backup created: $BACKUP_FILE"
 }
 
@@ -144,7 +145,7 @@ help() {
     echo "  restart       Restart all services"
     echo "  logs [service] View logs (optional: specific service)"
     echo "  status        Show services status"
-    echo "  test-gpu      Test GPU in backend"
+    echo "  test-gpu      Test AMD GPU (ROCm) in backend"
     echo "  clean         Remove all containers, volumes and images"
     echo "  rebuild       Rebuild everything from scratch"
     echo "  shell [service] Open shell in service (default: backend)"
