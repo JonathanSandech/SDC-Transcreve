@@ -25,6 +25,69 @@ services:
       retries: 5
 
   # ============================================
+  # pgAdmin - Interface Gráfica PostgreSQL
+  # ============================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: sdc-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@admin.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin123}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    ports:
+      - "5050:80"
+    networks:
+      - sdc-network
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/misc/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ============================================
+  # Ollama - LLM Server (com GPU NVIDIA)
+  # ============================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sdc-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - sdc-network
+    # >>> GPU NVIDIA (CUDA) - Para aceleração de IA <<<
+    runtime: nvidia
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: '4.0'
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ============================================
   # Backend Node.js + Python (com GPU AMD ROCm)
   # ============================================
   backend:
@@ -55,6 +118,11 @@ services:
       # FFmpeg
       FFMPEG_PATH: ffmpeg
       FFPROBE_PATH: ffprobe
+
+      # GPU NVIDIA (otimizado)
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_VISIBLE_DEVICES: "0"
     volumes:
       - uploads:/app/uploads
       - logs:/app/logs
@@ -65,10 +133,16 @@ services:
     depends_on:
       database:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
 
-    # >>> GPU NVIDIA (CUDA) <<<
+    # >>> GPU NVIDIA (CUDA) - Runtime otimizado <<<
+    runtime: nvidia
     deploy:
       resources:
+        limits:
+          memory: 12G
+          cpus: '4.0'
         reservations:
           devices:
             - driver: nvidia
@@ -118,5 +192,7 @@ networks:
 # ============================================
 volumes:
   postgres_data:
+  pgadmin_data:
   uploads:
   logs:
+  ollama_data:

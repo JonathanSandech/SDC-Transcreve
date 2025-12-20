@@ -3,7 +3,7 @@
 """
 Script de transcrição otimizado para arquivos grandes
 Usa streaming e processamento incremental para evitar stack overflow
-Otimizações: openai-whisper com suporte NVIDIA CUDA
+Otimizações: faster-whisper (CTranslate2) com suporte NVIDIA CUDA
 """
 
 import sys
@@ -15,8 +15,8 @@ import gc
 import tempfile
 import subprocess
 from pathlib import Path
-from moviepy.editor import VideoFileClip, AudioFileClip
-import whisper
+from moviepy import VideoFileClip, AudioFileClip
+from faster_whisper import WhisperModel
 import torch
 
 # Forçar UTF-8 no stdout e stderr ANTES de qualquer print
@@ -171,7 +171,8 @@ def check_gpu_memory(min_free_gb=2.0):
 def transcribe_simple(audio_path, model_size='medium'):
     """
     Transcrição de um único arquivo de áudio.
-    Usa Whisper (OpenAI) com suporte a NVIDIA CUDA.
+    Usa faster-whisper (CTranslate2) com suporte a NVIDIA CUDA.
+    Otimizado para máxima velocidade com RTX 3060 (12GB VRAM).
 
     Args:
         audio_path: Caminho do arquivo de áudio
@@ -192,21 +193,44 @@ def transcribe_simple(audio_path, model_size='medium'):
         if device == "cuda" and not check_gpu_memory(2.0):
             raise Exception("Insufficient GPU memory.")
 
-        model = whisper.load_model(model_size, device=device)
+        # faster-whisper: compute_type define precisão (float16 = rápido, int8 = muito rápido)
+        compute_type = "float16" if device == "cuda" else "int8"
 
-        send_progress(30, "Transcrevendo...")
-        fp16 = device == "cuda"
-
-        result = model.transcribe(
-            audio_path,
-            language="pt",
-            fp16=fp16,
-            beam_size=5,
-            temperature=0.0,
-            verbose=False
+        model = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=4,
+            num_workers=1
         )
 
-        text = result["text"].strip()
+        send_progress(30, "Transcrevendo...")
+
+        # faster-whisper retorna generator de segments, não dict
+        segments, info = model.transcribe(
+            audio_path,
+            language="pt",
+            beam_size=1,              # VELOCIDADE: 1 (rápido) vs 3-5 (preciso)
+            temperature=0.0,          # Determinístico (mais rápido)
+            vad_filter=True,          # VAD: pula silêncio (30-50% speedup!)
+            vad_parameters=dict(
+                threshold=0.5,        # Sensibilidade VAD (0-1, menor = mais agressivo)
+                min_speech_duration_ms=250,
+                min_silence_duration_ms=2000
+            ),
+            condition_on_previous_text=False  # VELOCIDADE: False (5-10% mais rápido)
+        )
+
+        # Info contém metadados
+        print(f"🌍 Detected language: {info.language} (confidence: {info.language_probability:.2f})", file=sys.stderr)
+        print(f"⏱️  Audio duration: {info.duration:.2f}s", file=sys.stderr)
+
+        # Coletar segments em texto completo
+        text_parts = []
+        for segment in segments:
+            text_parts.append(segment.text)
+
+        text = " ".join(text_parts).strip()
         print(f"✅ Transcribed {len(text)} characters", file=sys.stderr)
         send_progress(95, "Finalizando...")
         return text
@@ -225,7 +249,7 @@ def transcribe_simple(audio_path, model_size='medium'):
 def transcribe_with_chunking(audio_path, model_size):
     """
     Transcreve áudio dividindo-o em chunks para evitar estouro de memória.
-    Usa Whisper (OpenAI) com suporte a NVIDIA CUDA.
+    Usa faster-whisper (CTranslate2) com suporte a NVIDIA CUDA.
 
     Args:
         audio_path: Caminho do arquivo de áudio
@@ -234,7 +258,7 @@ def transcribe_with_chunking(audio_path, model_size):
     Returns:
         Texto transcrito completo
     """
-    chunk_duration = 720  # 12 minutos por chunk
+    chunk_duration = 900  # 15 minutos por chunk (otimizado para RTX 3060)
     temp_dir = None
     chunk_files = []
 
@@ -293,8 +317,8 @@ def main():
         duration = get_duration(audio_path)
         print(f"📊 Audio duration: {duration/60:.2f} min", file=sys.stderr)
 
-        # Usar chunking para áudios maiores que 1 hora
-        CHUNKING_THRESHOLD = 3600
+        # Usar chunking para áudios maiores que 90 minutos (RTX 3060 pode lidar com até 90min)
+        CHUNKING_THRESHOLD = 5400  # 90 minutos (otimizado para faster-whisper + RTX 3060)
 
         if duration > CHUNKING_THRESHOLD:
             print(f"⚠️ Long audio detected, using chunking strategy", file=sys.stderr)

@@ -23,8 +23,8 @@ RUN npm run build
 # Estágio 2: Runtime com PyTorch + CUDA (NVIDIA GPU)
 # ============================================
 # Imagem base com PyTorch compilado para CUDA (NVIDIA)
-# Tag: 2.2.2-cuda12.1-cudnn8-runtime
-FROM pytorch/pytorch:2.2.2-cuda12.1-cudnn8-runtime
+# Tag: 2.5.1-cuda12.4-cudnn9-runtime (otimizado para melhor compatibilidade com host)
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 # Metadados
 LABEL maintainer="jonathan.barbosa"
@@ -87,11 +87,17 @@ RUN chown -R 1000:1000 /app/python
 # Trocar para usuário não-root (usar UID numérico para garantir compatibilidade)
 USER 1000
 
-# Variáveis de ambiente
+# Variáveis de ambiente para Node.js
 ENV NODE_ENV=production \
     PORT=8000 \
     PYTHON_PATH=python3 \
     PATH="$PATH:/home/appuser/.local/bin"
+
+# Variáveis de otimização CUDA/GPU
+ENV CUDA_DEVICE_ORDER=PCI_BUS_ID \
+    CUDA_LAUNCH_BLOCKING=0 \
+    PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 \
+    LD_LIBRARY_PATH="/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib:${LD_LIBRARY_PATH}"
 
 # Expor porta do backend
 EXPOSE 8000

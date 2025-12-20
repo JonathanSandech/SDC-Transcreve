@@ -14,6 +14,11 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+*.secret
+*.secrets
+*.key
+*.pem
+*.crt
 
 # =====================================================
 # 🔥 PYTHON
@@ -49,6 +54,7 @@ logs/
 *.log
 *.tmp
 *.out
+*.bak
 
 uploads/
 failed_chunks/
@@ -61,6 +67,8 @@ cache/
 *.db
 *.sqlite
 *.db-journal
+dump.sql
+*.dump
 
 # CUDA debs muito grandes
 *.deb
@@ -71,6 +79,7 @@ cache/
 docker-data/
 docker-compose.override.yml
 .dockerignore
+/docker-backup/
 
 # =====================================================
 # 🔥 TESTES / RASCUNHOS / TRASH
@@ -80,6 +89,9 @@ nul
 *.ps1
 test_*.py
 test_*.bat
+foi.txt
+controlFile.txt
+network-config.txt
 
 # =====================================================
 # 🔥 ARQUIVOS DO CLAUDE / RASCUNHOS QUE VOCÊ NÃO QUER SUBIR
@@ -102,6 +114,9 @@ SOLUCAO_CRASH.md
 plan_upload.md
 upload.md
 portas.md
+GUIA-PGADMIN.md
+GUIA-ACESSO-REDE.md
+plan_commit.md
 
 # NÃO ignorar README principal
 !README.md

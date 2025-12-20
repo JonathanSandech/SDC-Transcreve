@@ -35,12 +35,14 @@ MAX_CONTENT_LENGTH = 10 * 1024 * 1024  # 10MB
 CORS_ORIGINS = '*'  # Em produção, especificar domínios confiáveis
 
 # ========== OLLAMA CONFIG ==========
-OLLAMA_BASE_URL = 'http://localhost:11434'
-OLLAMA_MODEL = 'gemma2:9b'
-OLLAMA_TIMEOUT = 600  # 15 minutos (suporta reuniões longas de +1h)
-OLLAMA_TEMPERATURE = 0.1
-OLLAMA_MAX_TOKENS = 6000
-OLLAMA_TOP_P = 0.8 
+# Quando rodando no Docker, usar o nome do serviço "ollama"
+# Quando rodando localmente, usar "localhost"
+OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', 'http://ollama:11434')
+OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'gemma2:9b')
+OLLAMA_TIMEOUT = int(os.getenv('OLLAMA_TIMEOUT', '600'))  # 10 minutos (suporta reuniões longas de +1h)
+OLLAMA_TEMPERATURE = float(os.getenv('OLLAMA_TEMPERATURE', '0.1'))
+OLLAMA_MAX_TOKENS = int(os.getenv('OLLAMA_MAX_TOKENS', '6000'))
+OLLAMA_TOP_P = float(os.getenv('OLLAMA_TOP_P', '0.8')) 
 
 # CORS - Adicionar origem do frontend Transcreve
 CORS_ORIGINS = [
