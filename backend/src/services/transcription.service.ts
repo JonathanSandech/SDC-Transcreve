@@ -39,8 +39,8 @@ export class TranscriptionService {
       const duration = await this.getAudioDuration(filePath);
       console.log(`🔍 [DEBUG] Duration: ${duration}s (${(duration/60).toFixed(1)}min)`);
 
-      // Threshold: 40 minutos (2400 segundos)
-      const V3_CHUNKING_THRESHOLD = 2400;
+      // Threshold: 90 minutos (5400 segundos) - RTX 3060 pode lidar com até 90min sem chunking
+      const V3_CHUNKING_THRESHOLD = 5400;  // Otimizado para faster-whisper + RTX 3060 (12GB VRAM)
       console.log(`🔍 [DEBUG] Checking duration threshold: ${duration} > ${V3_CHUNKING_THRESHOLD} = ${duration > V3_CHUNKING_THRESHOLD}`);
 
       if (duration > V3_CHUNKING_THRESHOLD) {
@@ -56,9 +56,9 @@ export class TranscriptionService {
         console.log(`🔍 [DEBUG] audioPath set to: ${audioPath}`);
 
         // 3. Dividir áudio em chunks
-        console.log(`🔍 [DEBUG] About to split audio into chunks (720s each)...`);
+        console.log(`🔍 [DEBUG] About to split audio into chunks (900s each)...`);
         sendProgress(id, 10, 'Dividindo áudio em chunks...');
-        const chunks = await this.splitAudioIntoChunks(audioPath, 720); // 12 min chunks
+        const chunks = await this.splitAudioIntoChunks(audioPath, 900); // 15 min chunks (otimizado para faster-whisper + RTX 3060)
         console.log(`🔍 [DEBUG] Chunks created: ${chunks.length} chunks`);
 
         logger.info(`📊 Processing ${chunks.length} chunks with V3 architecture`);
@@ -85,11 +85,10 @@ export class TranscriptionService {
             // Deletar chunk após processar
             await fs.unlink(chunks[i]);
 
-            // Delay para permitir GPU liberar memória completamente
-            // 15 segundos: Windows GPU driver precisa 10-15s para cleanup completo
+            // Delay mínimo: faster-whisper (CTranslate2) gerencia memória automaticamente
             if (i < chunks.length - 1) {  // Não esperar após último chunk
-              logger.info(`⏳ Waiting 15s for GPU memory cleanup before next chunk...`);
-              await new Promise(resolve => setTimeout(resolve, 15000)); // 15 segundos (Windows GPU cleanup)
+              logger.info(`⏳ Waiting 500ms for GPU memory cleanup before next chunk...`);
+              await new Promise(resolve => setTimeout(resolve, 500)); // 500ms (faster-whisper cleanup é rápido)
               logger.info('🔄 Ready for next chunk');
             }
 

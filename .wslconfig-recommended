@@ -1,0 +1,93 @@
+# ============================================
+# Configuração Recomendada do WSL2
+# Arquivo: .wslconfig
+# ============================================
+# Este arquivo deve ser colocado em: C:\Users\<SeuUsuario>\.wslconfig
+#
+# Após criar/editar, reinicie o WSL com:
+# wsl --shutdown
+#
+# Configuração otimizada para máquinas com 16GB RAM
+# ============================================
+
+[wsl2]
+# ============================================
+# MEMÓRIA
+# ============================================
+# Limitar memória do WSL2 para 6GB (ao invés do padrão 50% = 8GB)
+# Deixa 10GB para o Windows e outras aplicações
+memory=6GB
+
+# ============================================
+# PROCESSADORES
+# ============================================
+# Limitar processadores (opcional)
+# Descomente se quiser limitar. Padrão: todos os cores
+# processors=4
+
+# ============================================
+# SWAP
+# ============================================
+# Tamanho do arquivo de swap
+# Reduzido para 2GB (padrão seria 25% da RAM = 4GB)
+swap=2GB
+
+# Caminho do arquivo de swap (opcional)
+# swapFile=C:\\temp\\wsl-swap.vhdx
+
+# ============================================
+# OTIMIZAÇÕES
+# ============================================
+# Localizar e liberar memória cached não utilizada
+# Ajuda a devolver RAM ao Windows
+localhostForwarding=true
+
+# ============================================
+# REDE
+# ============================================
+# Habilitar recursos de rede
+# networkingMode=mirrored  # Requer Windows 11 22H2+
+
+# ============================================
+# GPU (NVIDIA)
+# ============================================
+# Habilitar suporte a GPU (CUDA/DirectX)
+# nestedVirtualization=true
+# vmIdleTimeout=60000
+
+# ============================================
+# KERNEL
+# ============================================
+# Caminho para kernel customizado (opcional)
+# kernel=C:\\Users\\<user>\\bzImage
+
+# ============================================
+# CONFIGURAÇÕES AVANÇADAS
+# ============================================
+# Liberar memória do page cache após 1 minuto de inatividade
+# (Experimental - requer kernel 5.10.16.3+)
+# kernelCommandLine = "sysctl.vm.drop_caches=1"
+
+# ============================================
+# NOTAS IMPORTANTES:
+# ============================================
+# 1. Após editar, execute no PowerShell:
+#    wsl --shutdown
+#
+# 2. Aguarde alguns segundos e inicie o WSL novamente:
+#    wsl
+#
+# 3. Verifique a memória disponível no WSL:
+#    free -h
+#    (Deve mostrar ~6GB total ao invés de ~8GB)
+#
+# 4. Monitore o uso de memória do Windows:
+#    Gerenciador de Tarefas → Desempenho → Memória
+#
+# 5. Se ainda estiver alto, reduza para 4GB:
+#    memory=4GB
+#
+# 6. Para aplicação de transcrição com GPU, 6GB é suficiente
+#    pois o processamento pesado usa VRAM (GPU), não RAM
+#
+# ============================================

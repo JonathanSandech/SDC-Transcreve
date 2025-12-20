@@ -1,15 +1,24 @@
 # Dependências para transcrição de áudio/vídeo
-# Usando faster-whisper com PyTorch/ROCm
+# Usando faster-whisper (CTranslate2) com PyTorch/CUDA
 # Script: transcribe.py
 
-# Processamento de vídeo/áudio
+# Processamento de vídeo/ádio
 moviepy>=1.0.3
 
-# faster-whisper - otimizado e compatível com AMD ROCm
+# faster-whisper (CTranslate2 backend) - 3-6x mais rápido que openai-whisper
 faster-whisper>=1.0.0
+
+# PyTorch (já incluído na imagem base pytorch/pytorch)
+# Comentado para evitar conflitos com a versão otimizada da imagem base
+# torch>=2.2.2
+# torchaudio>=2.2.2
 
 # Dependências auxiliares
 numpy>=1.24.0
 
-# Nota: PyTorch com ROCm virá da imagem base rocm/pytorch
-# Não incluir torch ou torchaudio aqui
+# ========== GERADOR DE ATA ==========
+# Geração de documentos Word
+python-docx==1.1.0
+
+# Comunicação HTTP (Ollama)
+requests>=2.31.0
